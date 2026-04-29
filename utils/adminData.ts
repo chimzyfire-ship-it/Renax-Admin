@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../supabase';
 
 const ACTIVE_STAGES = [
@@ -26,6 +27,70 @@ const startOfTodayIso = () => {
 
 const formatLocation = (row: any) =>
   row?.metadata?.location_label || (row?.lat && row?.lng ? `${row.lat.toFixed(3)}, ${row.lng.toFixed(3)}` : 'Unknown');
+
+const DAY_FILTERS: Record<string, number> = {
+  '7d': 7,
+  '30d': 30,
+  '90d': 90,
+};
+
+const SETTINGS_STORAGE_KEY = 'renax-admin-settings-v1';
+
+const DEFAULT_ADMIN_SETTINGS = {
+  companyName: 'RENAX Logistics',
+  companyAddress: '12 Logistics Way, Lagos, Nigeria',
+  companyPhone: '+234 901 234 5678',
+  companyEmail: 'admin@renaxlogistics.com',
+  emailAlerts: true,
+  smsAlerts: true,
+  pushAlerts: false,
+  twoFactorEnabled: true,
+  passwordPolicy: 'Minimum 8 characters, must include a number and symbol',
+  defaultCurrency: 'NGN',
+  timeZone: 'Africa/Lagos',
+  language: 'English',
+  dateFormat: 'DD-MM-YYYY',
+  sessionTimeoutMinutes: 30,
+  paymentGateway: 'Flutterwave',
+  commissionRate: 12,
+  payoutSchedule: 'Weekly (Every Friday)',
+};
+
+const startDateForRange = (rangeKey: string) => {
+  const days = DAY_FILTERS[rangeKey] || 30;
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() - (days - 1));
+  return date;
+};
+
+const formatDayKey = (value: string | Date) =>
+  new Date(value).toLocaleDateString('en-CA');
+
+const formatChartLabel = (value: string | Date) =>
+  new Date(value).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+const sumAmount = (items: any[], key: string) =>
+  items.reduce((total, item) => total + Number(item?.[key] || 0), 0);
+
+function buildDayBuckets(rangeKey: string) {
+  const start = startDateForRange(rangeKey);
+  const days = DAY_FILTERS[rangeKey] || 30;
+
+  return Array.from({ length: days }).map((_, index) => {
+    const current = new Date(start);
+    current.setDate(start.getDate() + index);
+    return {
+      key: formatDayKey(current),
+      label: formatChartLabel(current),
+      shipments: 0,
+      delivered: 0,
+      revenue: 0,
+      walletFunding: 0,
+      withdrawals: 0,
+    };
+  });
+}
 
 export async function fetchAdminOverview() {
   const todayIso = startOfTodayIso();
@@ -191,4 +256,268 @@ export async function updateFleetVehicleStatus(riderId: string, nextStatus: stri
     .eq('rider_id', riderId);
 
   if (error) throw error;
+}
+
+export async function fetchAnalyticsData(rangeKey = '30d') {
+  const startDate = startDateForRange(rangeKey);
+  const [{ data: shipments }, { data: riderLocations }, { data: terminals }] = await Promise.all([
+    supabase
+      .from('shipments')
+      .select('id, tracking_id, delivery_state, routing_mode, dispatch_stage, estimated_price, distance_km, created_at, updated_at')
+      .gte('created_at', startDate.toISOString()),
+    supabase
+      .from('rider_locations')
+      .select('rider_id, is_online, metadata'),
+    supabase
+      .from('terminals')
+      .select('id, name, code, state, city'),
+  ]);
+
+  const safeShipments = shipments || [];
+  const safeRiders = riderLocations || [];
+  const safeTerminals = terminals || [];
+  const dayBuckets = buildDayBuckets(rangeKey);
+  const bucketMap = new Map(dayBuckets.map((bucket) => [bucket.key, bucket]));
+
+  let deliveredCount = 0;
+  let deliveryHoursTotal = 0;
+
+  safeShipments.forEach((shipment: any) => {
+    const createdKey = formatDayKey(shipment.created_at);
+    const createdBucket = bucketMap.get(createdKey);
+    if (createdBucket) createdBucket.shipments += 1;
+
+    if (shipment.dispatch_stage === 'delivered') {
+      deliveredCount += 1;
+      const deliveredKey = formatDayKey(shipment.updated_at || shipment.created_at);
+      const deliveredBucket = bucketMap.get(deliveredKey);
+      if (deliveredBucket) {
+        deliveredBucket.delivered += 1;
+        deliveredBucket.revenue += Number(shipment.estimated_price || 0);
+      }
+
+      const createdAt = new Date(shipment.created_at).getTime();
+      const deliveredAt = new Date(shipment.updated_at || shipment.created_at).getTime();
+      if (deliveredAt >= createdAt) {
+        deliveryHoursTotal += (deliveredAt - createdAt) / (1000 * 60 * 60);
+      }
+    }
+  });
+
+  const totalShipments = safeShipments.length;
+  const totalRevenue = safeShipments
+    .filter((shipment: any) => shipment.dispatch_stage === 'delivered')
+    .reduce((total: number, shipment: any) => total + Number(shipment.estimated_price || 0), 0);
+  const successRate = totalShipments ? (deliveredCount / totalShipments) * 100 : 0;
+  const avgDeliveryHours = deliveredCount ? deliveryHoursTotal / deliveredCount : 0;
+
+  const statusBreakdownRaw = [
+    { label: 'Delivered', count: safeShipments.filter((shipment: any) => shipment.dispatch_stage === 'delivered').length, color: '#10B981' },
+    { label: 'Out for Delivery', count: safeShipments.filter((shipment: any) => shipment.dispatch_stage === 'out_for_delivery').length, color: '#0EA5E9' },
+    { label: 'Terminal Relay', count: safeShipments.filter((shipment: any) => shipment.routing_mode === 'relay_terminal' && shipment.dispatch_stage !== 'delivered').length, color: '#7C3AED' },
+    { label: 'Exception', count: safeShipments.filter((shipment: any) => shipment.dispatch_stage === 'exception').length, color: '#DC2626' },
+  ];
+
+  const topCities = Object.entries(
+    safeShipments.reduce((acc: Record<string, number>, shipment: any) => {
+      const city = shipment.delivery_state || 'Unknown';
+      acc[city] = (acc[city] || 0) + 1;
+      return acc;
+    }, {})
+  )
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .slice(0, 6)
+    .map(([city, count]) => ({ city, count }));
+
+  const reports = [
+    {
+      id: 'ops-summary',
+      name: 'Operations Summary',
+      period: `Last ${DAY_FILTERS[rangeKey] || 30} days`,
+      generated: new Date().toISOString(),
+      summary: `${totalShipments} shipments analysed`,
+    },
+    {
+      id: 'terminal-load',
+      name: 'Terminal Load Snapshot',
+      period: `Current as of ${new Date().toLocaleDateString('en-US')}`,
+      generated: new Date().toISOString(),
+      summary: `${safeTerminals.length} active terminals`,
+    },
+    {
+      id: 'rider-presence',
+      name: 'Rider Presence Snapshot',
+      period: `Current as of ${new Date().toLocaleDateString('en-US')}`,
+      generated: new Date().toISOString(),
+      summary: `${safeRiders.filter((rider: any) => rider.is_online).length} riders online`,
+    },
+  ];
+
+  return {
+    metrics: {
+      totalShipments,
+      totalRevenue,
+      avgDeliveryHours,
+      successRate,
+      ridersOnline: safeRiders.filter((rider: any) => rider.is_online).length,
+    },
+    trend: dayBuckets,
+    statusBreakdown: statusBreakdownRaw.filter((item) => item.count > 0),
+    topCities,
+    reports,
+  };
+}
+
+export async function fetchFinanceData(rangeKey = '30d') {
+  const startDate = startDateForRange(rangeKey);
+  const [{ data: shipments }, { data: walletTransactions }, { data: walletWithdrawals }, { data: riderLocations }] = await Promise.all([
+    supabase
+      .from('shipments')
+      .select('id, tracking_id, payment_method, dispatch_stage, estimated_price, created_at, updated_at, sender_name, recipient_name')
+      .gte('created_at', startDate.toISOString()),
+    supabase
+      .from('wallet_transactions')
+      .select('*')
+      .gte('created_at', startDate.toISOString())
+      .order('created_at', { ascending: false }),
+    supabase
+      .from('wallet_withdrawals')
+      .select('*')
+      .gte('created_at', startDate.toISOString())
+      .order('created_at', { ascending: false }),
+    supabase
+      .from('rider_locations')
+      .select('rider_id'),
+  ]);
+
+  const safeShipments = shipments || [];
+  const safeWalletTransactions = walletTransactions || [];
+  const safeWalletWithdrawals = walletWithdrawals || [];
+  const safeRiders = riderLocations || [];
+  const todayIso = startOfTodayIso();
+  const dayBuckets = buildDayBuckets(rangeKey);
+  const bucketMap = new Map(dayBuckets.map((bucket) => [bucket.key, bucket]));
+
+  safeShipments.forEach((shipment: any) => {
+    if (shipment.dispatch_stage !== 'delivered') return;
+    const key = formatDayKey(shipment.updated_at || shipment.created_at);
+    const bucket = bucketMap.get(key);
+    if (!bucket) return;
+    bucket.revenue += Number(shipment.estimated_price || 0);
+    bucket.delivered += 1;
+  });
+
+  safeWalletTransactions.forEach((transaction: any) => {
+    const key = formatDayKey(transaction.created_at);
+    const bucket = bucketMap.get(key);
+    if (!bucket) return;
+    if (transaction.type === 'topup') bucket.walletFunding += Number(transaction.amount || 0);
+    if (transaction.type === 'withdrawal') bucket.withdrawals += Number(transaction.amount || 0);
+  });
+
+  const deliveredShipments = safeShipments.filter((shipment: any) => shipment.dispatch_stage === 'delivered');
+  const totalEarnings = sumAmount(deliveredShipments, 'estimated_price');
+  const revenueToday = deliveredShipments
+    .filter((shipment: any) => (shipment.updated_at || shipment.created_at) >= todayIso)
+    .reduce((total: number, shipment: any) => total + Number(shipment.estimated_price || 0), 0);
+  const pendingPayouts = safeWalletWithdrawals
+    .filter((withdrawal: any) => withdrawal.status === 'pending')
+    .reduce((total: number, withdrawal: any) => total + Number(withdrawal.amount || 0), 0);
+  const avgEarningsPerRider = safeRiders.length ? totalEarnings / safeRiders.length : 0;
+
+  const paymentMethodBreakdown = Object.entries(
+    deliveredShipments.reduce((acc: Record<string, number>, shipment: any) => {
+      const method = shipment.payment_method || 'Unknown';
+      acc[method] = (acc[method] || 0) + Number(shipment.estimated_price || 0);
+      return acc;
+    }, {})
+  )
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .map(([label, amount], index) => ({
+      label,
+      amount: Number(amount),
+      color: ['#10B981', '#3B82F6', '#F59E0B', '#7C3AED', '#DC2626'][index % 5],
+    }));
+
+  const recentTransactions = [
+    ...safeWalletTransactions.map((transaction: any) => ({
+      id: transaction.reference || transaction.id,
+      date: transaction.created_at,
+      description: transaction.description || transaction.type,
+      entity: transaction.method || transaction.type,
+      amount: Number(transaction.amount || 0),
+      status: transaction.status || 'pending',
+      category: transaction.type,
+    })),
+    ...deliveredShipments.slice(0, 12).map((shipment: any) => ({
+      id: shipment.tracking_id || shipment.id,
+      date: shipment.updated_at || shipment.created_at,
+      description: 'Delivered shipment revenue',
+      entity: shipment.recipient_name || shipment.sender_name || 'Customer',
+      amount: Number(shipment.estimated_price || 0),
+      status: 'completed',
+      category: 'shipment_revenue',
+    })),
+  ]
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    .slice(0, 16);
+
+  return {
+    metrics: {
+      totalEarnings,
+      revenueToday,
+      pendingPayouts,
+      avgEarningsPerRider,
+      walletFunding: safeWalletTransactions
+        .filter((transaction: any) => transaction.type === 'topup' && transaction.status === 'success')
+        .reduce((total: number, transaction: any) => total + Number(transaction.amount || 0), 0),
+    },
+    trend: dayBuckets,
+    breakdown: paymentMethodBreakdown,
+    recentTransactions,
+  };
+}
+
+export async function loadAdminSettings() {
+  const { data: { user } } = await supabase.auth.getUser();
+  const storageKey = `${SETTINGS_STORAGE_KEY}:${user?.id || 'mock-admin'}`;
+  const stored = await AsyncStorage.getItem(storageKey);
+  const parsed = stored ? JSON.parse(stored) : {};
+
+  let profile = null;
+  if (user?.id) {
+    const { data } = await supabase
+      .from('profiles')
+      .select('full_name, phone_number, email')
+      .eq('id', user.id)
+      .maybeSingle();
+    profile = data;
+  }
+
+  return {
+    ...DEFAULT_ADMIN_SETTINGS,
+    ...parsed,
+    companyEmail: parsed.companyEmail || profile?.email || DEFAULT_ADMIN_SETTINGS.companyEmail,
+    companyPhone: parsed.companyPhone || profile?.phone_number || DEFAULT_ADMIN_SETTINGS.companyPhone,
+  };
+}
+
+export async function saveAdminSettings(settings: Record<string, any>) {
+  const { data: { user } } = await supabase.auth.getUser();
+  const storageKey = `${SETTINGS_STORAGE_KEY}:${user?.id || 'mock-admin'}`;
+  await AsyncStorage.setItem(storageKey, JSON.stringify(settings));
+
+  if (user?.id) {
+    await supabase
+      .from('profiles')
+      .upsert({
+        id: user.id,
+        role: 'admin',
+        full_name: settings.companyName,
+        phone_number: settings.companyPhone,
+        email: settings.companyEmail,
+      }, { onConflict: 'id' });
+  }
+
+  return settings;
 }

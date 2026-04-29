@@ -46,6 +46,7 @@ export default function AdminLayout({ children, currentMenu = 'dashboard', onMen
   const { width } = useWindowDimensions();
   const isMobile = width < 1024;
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const expandedWidth = 240; // slightly wider to fit new long texts comfortably
   const collapsedWidth = 84; // wide enough to center icons nicely
@@ -100,7 +101,10 @@ export default function AdminLayout({ children, currentMenu = 'dashboard', onMen
                       styles.menuItem, 
                       isActive && styles.activeMenuItem,
                     ]}
-                    onPress={() => onMenuChange && onMenuChange(menu.key)}
+                    onPress={() => {
+                      onMenuChange && onMenuChange(menu.key);
+                      if (isMobile) setMobileNavOpen(false);
+                    }}
                   >
                     <View style={styles.iconBox}>
                        <Icon size={20} color={isActive ? BRAND.green : BRAND.white} />
@@ -133,6 +137,48 @@ export default function AdminLayout({ children, currentMenu = 'dashboard', onMen
         </Animated.View>
       )}
 
+      {isMobile && mobileNavOpen && (
+        <>
+          <TouchableOpacity style={styles.mobileOverlay} activeOpacity={1} onPress={() => setMobileNavOpen(false)} />
+          <View style={styles.mobileDrawer}>
+            <View style={styles.mobileDrawerHeader}>
+              <Image source={require('../../assets/images/logo.jpg')} style={styles.mobileDrawerLogo} resizeMode="cover" />
+            </View>
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.menuContainer}>
+              {SIDEBAR_MENUS.map((menu) => {
+                const Icon = menu.icon;
+                const isActive = currentMenu === menu.key;
+                return (
+                  <TouchableOpacity
+                    key={menu.key}
+                    style={[styles.menuItem, isActive && styles.activeMenuItem]}
+                    onPress={() => {
+                      onMenuChange && onMenuChange(menu.key);
+                      setMobileNavOpen(false);
+                    }}
+                  >
+                    <View style={styles.iconBox}>
+                      <Icon size={20} color={isActive ? BRAND.green : BRAND.white} />
+                    </View>
+                    <Text style={[styles.menuText, isActive && styles.activeMenuText]} numberOfLines={1}>
+                      {menu.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+            <View style={styles.sidebarFooter}>
+              <TouchableOpacity style={styles.logoutBtn} onPress={() => onLogout && onLogout()}>
+                <View style={styles.iconBox}>
+                  <LogOut size={20} color={'rgba(255,255,255,0.7)'} />
+                </View>
+                <Text style={styles.logoutText}>Logout</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </>
+      )}
+
       {/* Main Content Area */}
       <View style={styles.mainArea}>
         {/* ABSOLUTE GLOBAL BACKGROUND - Adjusted to bring yellow to center */}
@@ -148,10 +194,14 @@ export default function AdminLayout({ children, currentMenu = 'dashboard', onMen
         <View style={StyleSheet.absoluteFillObject} backgroundColor="rgba(244, 247, 245, 0.4)" />
 
         {/* Top Navigation Bar */}
-        <View style={styles.topNav}>
+        <View style={[styles.topNav, isMobile && styles.topNavMobile]}>
           <View style={styles.topNavLeft}>
-            {/* The old top nav header icon is removed per request */}
-            <View style={styles.topNavLinks}>
+            {isMobile && (
+              <TouchableOpacity style={styles.mobileMenuBtn} onPress={() => setMobileNavOpen(true)}>
+                <List size={18} color={BRAND.text} />
+              </TouchableOpacity>
+            )}
+            <View style={[styles.topNavLinks, isMobile && styles.topNavLinksMobile]}>
               {TOP_NAV_MENUS.map(nav => (
                 <TouchableOpacity key={nav.key} style={styles.topNavLink}>
                   <Text style={styles.topNavLinkText}>{nav.label}</Text>
@@ -160,7 +210,7 @@ export default function AdminLayout({ children, currentMenu = 'dashboard', onMen
             </View>
           </View>
           
-          <View style={styles.topNavRight}>
+          <View style={[styles.topNavRight, isMobile && styles.topNavRightMobile]}>
             <TouchableOpacity style={styles.notificationBtn}>
               <Bell size={20} color={BRAND.text} />
               <View style={styles.badge}><Text style={styles.badgeText}>3</Text></View>
@@ -174,7 +224,7 @@ export default function AdminLayout({ children, currentMenu = 'dashboard', onMen
         </View>
 
         {/* Dynamic Content */}
-        <ScrollView style={styles.contentScroll} contentContainerStyle={styles.contentContainer}>
+        <ScrollView style={styles.contentScroll} contentContainerStyle={[styles.contentContainer, isMobile && styles.contentContainerMobile]}>
           {children}
         </ScrollView>
       </View>
@@ -268,6 +318,31 @@ const styles = StyleSheet.create({
     paddingVertical: 20,
     paddingHorizontal: 20,
   },
+  mobileOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(2, 15, 9, 0.5)',
+    zIndex: 40,
+  },
+  mobileDrawer: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    width: 280,
+    backgroundColor: BRAND.green,
+    zIndex: 45,
+    paddingTop: 0,
+  },
+  mobileDrawerHeader: {
+    height: 104,
+    backgroundColor: '#00281a',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  mobileDrawerLogo: {
+    width: '100%',
+    height: '100%',
+  },
   logoutBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -301,13 +376,27 @@ const styles = StyleSheet.create({
     paddingHorizontal: 40, // Increased padding to avoid toggle button overlap
     ...(Platform.OS === 'web' ? { backdropFilter: 'blur(20px)' } : {}),
   },
+  topNavMobile: {
+    height: 'auto',
+    minHeight: 70,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    alignItems: 'flex-start',
+    gap: 12,
+  },
   topNavLeft: {
     flexDirection: 'row',
     alignItems: 'center',
+    flex: 1,
+    minWidth: 0,
   },
   topNavLinks: {
     flexDirection: 'row',
     gap: 30,
+  },
+  topNavLinksMobile: {
+    gap: 14,
+    flexWrap: 'wrap',
   },
   topNavLink: {
     paddingVertical: 10,
@@ -321,6 +410,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 20,
+  },
+  topNavRightMobile: {
+    alignSelf: 'flex-end',
+    gap: 12,
+  },
+  mobileMenuBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: '#F3F4F6',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+    flexShrink: 0,
   },
   notificationBtn: {
     position: 'relative',
@@ -358,5 +461,8 @@ const styles = StyleSheet.create({
   },
   contentContainer: {
     padding: 30,
-  }
+  },
+  contentContainerMobile: {
+    padding: 16,
+  },
 });

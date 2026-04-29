@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { AlertCircle, ArrowUpRight, PackageSearch, RefreshCw, Truck, Users, Warehouse } from 'lucide-react-native';
 import { BRAND } from '../../constants/Theme';
 import { fetchAdminOverview } from '../../utils/adminData';
@@ -19,6 +19,9 @@ const formatDate = (dateStr: string) =>
   });
 
 export default function AdminDashboard() {
+  const { width } = useWindowDimensions();
+  const isCompact = width < 768;
+  const isTablet = width < 1180;
   const glass = Platform.OS === 'web' ? { backdropFilter: 'blur(16px)' } : {};
   const [overview, setOverview] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -124,6 +127,7 @@ export default function AdminDashboard() {
                   key={card.label}
                   style={[
                     styles.statCard,
+                    isCompact && { minWidth: '100%' },
                     isGreen && styles.greenGlassCard,
                     !isGreen && styles.whiteGlassCard,
                     isDanger && styles.dangerGlassCard,
@@ -160,8 +164,8 @@ export default function AdminDashboard() {
             })}
           </View>
 
-          <View style={styles.mainGrid}>
-            <View style={[styles.panel, styles.largePanel, glass]}>
+          <View style={[styles.mainGrid, isTablet && { flexDirection: 'column' }]}>
+            <View style={[styles.panel, styles.largePanel, glass, isTablet && styles.fullWidthPanel]}>
               <Text style={styles.sectionTitle}>Dispatch Breakdown</Text>
               <View style={styles.breakdownGrid}>
                 {[
@@ -172,7 +176,7 @@ export default function AdminDashboard() {
                   ['Out For Delivery', stageBreakdown.out_for_delivery || 0, '#10B981'],
                   ['Exception', stageBreakdown.exception || 0, '#DC2626'],
                 ].map(([label, value, color]) => (
-                  <View key={String(label)} style={styles.breakdownCard}>
+                  <View key={String(label)} style={[styles.breakdownCard, isCompact && styles.breakdownCardCompact]}>
                     <View style={[styles.breakdownDot, { backgroundColor: String(color) }]} />
                     <Text style={styles.breakdownLabel}>{String(label)}</Text>
                     <Text style={styles.breakdownValue}>{String(value)}</Text>
@@ -181,40 +185,44 @@ export default function AdminDashboard() {
               </View>
 
               <Text style={[styles.sectionTitle, { marginTop: 8 }]}>Recent Shipments</Text>
-              <View style={styles.tableHeader}>
-                <Text style={[styles.tableHeadText, { flex: 1.1 }]}>Tracking</Text>
-                <Text style={[styles.tableHeadText, { flex: 1.4 }]}>Route</Text>
-                <Text style={[styles.tableHeadText, { flex: 1.1 }]}>Routing</Text>
-                <Text style={[styles.tableHeadText, { flex: 1.2 }]}>Stage</Text>
-                <Text style={[styles.tableHeadText, { flex: 0.9 }]}>Amount</Text>
-              </View>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                <View style={{ minWidth: isCompact ? 700 : '100%' }}>
+                  <View style={styles.tableHeader}>
+                    <Text style={[styles.tableHeadText, { flex: 1.1 }]}>Tracking</Text>
+                    <Text style={[styles.tableHeadText, { flex: 1.4 }]}>Route</Text>
+                    <Text style={[styles.tableHeadText, { flex: 1.1 }]}>Routing</Text>
+                    <Text style={[styles.tableHeadText, { flex: 1.2 }]}>Stage</Text>
+                    <Text style={[styles.tableHeadText, { flex: 0.9 }]}>Amount</Text>
+                  </View>
 
-              {recentShipments.length === 0 ? (
-                <Text style={styles.emptyText}>No live shipments yet.</Text>
-              ) : (
-                recentShipments.map((shipment: any) => {
-                  const stage = shipment.dispatch_stage || 'pending_routing';
-                  const routingMode = shipment.routing_mode || 'last_mile_local';
-                  const color = stageColor(stage);
-                  return (
-                    <View key={shipment.id} style={styles.tableRow}>
-                      <Text style={[styles.tableCell, { flex: 1.1, fontWeight: '700', color: '#003822' }]}>{shipment.tracking_id || shipment.id}</Text>
-                      <Text style={[styles.tableCell, { flex: 1.4 }]}>{`${shipment.pickup_state || 'Unknown'} -> ${shipment.delivery_state || 'Unknown'}`}</Text>
-                      <Text style={[styles.tableCell, { flex: 1.1 }]}>
-                        {routingMode === 'relay_terminal' ? 'Relay' : routingMode === 'manual_review' ? 'Review' : 'Local'}
-                      </Text>
-                      <View style={{ flex: 1.2 }}>
-                        <Text style={[styles.tableCell, { color }]}>{stageLabel(stage)}</Text>
-                        <Text style={styles.tableMeta}>{shipmentStatusFromStage(stage, routingMode)}</Text>
-                      </View>
-                      <Text style={[styles.tableCell, { flex: 0.9, fontWeight: '700' }]}>{formatAmount(shipment.estimated_price || 0)}</Text>
-                    </View>
-                  );
-                })
-              )}
+                  {recentShipments.length === 0 ? (
+                    <Text style={styles.emptyText}>No live shipments yet.</Text>
+                  ) : (
+                    recentShipments.map((shipment: any) => {
+                      const stage = shipment.dispatch_stage || 'pending_routing';
+                      const routingMode = shipment.routing_mode || 'last_mile_local';
+                      const color = stageColor(stage);
+                      return (
+                        <View key={shipment.id} style={styles.tableRow}>
+                          <Text style={[styles.tableCell, { flex: 1.1, fontWeight: '700', color: '#003822' }]}>{shipment.tracking_id || shipment.id}</Text>
+                          <Text style={[styles.tableCell, { flex: 1.4 }]}>{`${shipment.pickup_state || 'Unknown'} -> ${shipment.delivery_state || 'Unknown'}`}</Text>
+                          <Text style={[styles.tableCell, { flex: 1.1 }]}>
+                            {routingMode === 'relay_terminal' ? 'Relay' : routingMode === 'manual_review' ? 'Review' : 'Local'}
+                          </Text>
+                          <View style={{ flex: 1.2 }}>
+                            <Text style={[styles.tableCell, { color }]}>{stageLabel(stage)}</Text>
+                            <Text style={styles.tableMeta}>{shipmentStatusFromStage(stage, routingMode)}</Text>
+                          </View>
+                          <Text style={[styles.tableCell, { flex: 0.9, fontWeight: '700' }]}>{formatAmount(shipment.estimated_price || 0)}</Text>
+                        </View>
+                      );
+                    })
+                  )}
+                </View>
+              </ScrollView>
             </View>
 
-            <View style={[styles.panel, styles.sidePanel, glass]}>
+            <View style={[styles.panel, styles.sidePanel, glass, isTablet && styles.fullWidthPanel]}>
               <Text style={styles.sectionTitle}>Terminal Load</Text>
               {terminalLoads.length === 0 ? (
                 <Text style={styles.emptyText}>No terminals found.</Text>
@@ -414,6 +422,10 @@ const styles = StyleSheet.create({
     flex: 0.85,
     minWidth: 320,
   },
+  fullWidthPanel: {
+    minWidth: 0,
+    width: '100%',
+  },
   footerPanel: {
     backgroundColor: 'rgba(255,255,255,0.92)',
     borderRadius: 18,
@@ -441,6 +453,10 @@ const styles = StyleSheet.create({
     padding: 16,
     borderWidth: 1,
     borderColor: '#EEF2F7',
+  },
+  breakdownCardCompact: {
+    width: '100%',
+    minWidth: 0,
   },
   breakdownDot: {
     width: 10,

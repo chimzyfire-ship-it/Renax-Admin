@@ -47,7 +47,7 @@ export default function AdminAuthScreen({ onAuthenticated }) {
 
       <View style={[styles.authContainer, isMobile && { flexDirection: 'column' }]}>
         {/* ── LEFT PANEL ── */}
-        <Animated.View entering={FadeIn.duration(800)} style={styles.leftPanel}>
+        <Animated.View entering={FadeIn.duration(800)} style={[styles.leftPanel, isMobile && styles.leftPanelMobile]}>
           <Image source={require('../../assets/images/logo.jpg')} style={styles.authLogo} resizeMode="contain" />
           <Text style={styles.authBrandTitle}>Command Center</Text>
           <Text style={styles.authBrandSub}>Secure administrative portal for {'\n'}RENAX Logistics operations.</Text>
@@ -71,7 +71,7 @@ export default function AdminAuthScreen({ onAuthenticated }) {
         </Animated.View>
 
         {/* ── RIGHT PANEL ── */}
-        <Animated.View entering={FadeInDown.duration(700)} style={[styles.rightPanel, glass]}>
+        <Animated.View entering={FadeInDown.duration(700)} style={[styles.rightPanel, glass, isMobile && styles.rightPanelMobile]}>
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 20 }}>
             <Animated.View entering={FadeInDown.duration(400)} style={{ gap: 24 }}>
               <View>
@@ -139,8 +139,14 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: 'rgba(0,40,26,0.3)',
   },
+  leftPanelMobile: {
+    paddingHorizontal: 20,
+    paddingTop: 44,
+    paddingBottom: 20,
+  },
   authLogo: {
-    width: 340,
+    width: '100%',
+    maxWidth: 340,
     height: 140,
     marginBottom: 10,
   },
@@ -182,6 +188,15 @@ const styles = StyleSheet.create({
     borderLeftWidth: 1,
     borderLeftColor: 'rgba(255,255,255,0.06)',
     justifyContent: 'center',
+  },
+  rightPanelMobile: {
+    width: '100%',
+    paddingHorizontal: 20,
+    paddingTop: 28,
+    paddingBottom: 36,
+    borderLeftWidth: 0,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.06)',
   },
   authWelcome: {
     fontFamily: 'PlusJakartaSans_8',
