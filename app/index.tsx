@@ -4,14 +4,15 @@ import AdminAuthScreen from '../components/admin/AdminAuthScreen';
 import AdminLayout from '../components/admin/AdminLayout';
 import AdminDashboard from '../components/admin/AdminDashboard';
 import TrackShipments from '../components/admin/TrackShipments';
-import FleetManagement from '../components/admin/FleetManagement';
 import RidersDrivers from '../components/admin/RidersDrivers';
+import AgroTransport from '../components/admin/AgroTransport';
 import Customers from '../components/admin/Customers';
 import AnalyticsReports from '../components/admin/AnalyticsReports';
 import EarningsFinance from '../components/admin/EarningsFinance';
 import Settings from '../components/admin/Settings';
 import Shipments from '../components/admin/Shipments';
 import Terminals from '../components/admin/Terminals';
+import NotificationQueue from '../components/admin/NotificationQueue';
 import { BRAND } from '../constants/Theme';
 
 export default function AdminScreen() {
@@ -35,10 +36,11 @@ export default function AdminScreen() {
         return <TrackShipments />;
       case 'terminals':
         return <Terminals />;
-      case 'fleet':
-        return <FleetManagement />;
+
       case 'riders':
         return <RidersDrivers />;
+      case 'agro':
+        return <AgroTransport />;
       case 'customers':
         return <Customers />;
       case 'analytics':
@@ -49,6 +51,8 @@ export default function AdminScreen() {
         return <Settings />;
       case 'shipments':
         return <Shipments />;
+      case 'notif_queue':
+        return <NotificationQueue />;
       default:
         return (
           <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>

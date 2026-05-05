@@ -11,7 +11,7 @@ import {
   View,
 } from 'react-native';
 import { BRAND } from '../../constants/Theme';
-import { AlertTriangle, ChevronDown, FileText, MoveRight, RefreshCw, Route, X } from 'lucide-react-native';
+import { AlertTriangle, ChevronDown, FileText, MoveRight, RefreshCw, Route, X, Image as ImageIcon, CheckCircle, XCircle, ScanLine } from 'lucide-react-native';
 import { supabase } from '../../supabase';
 import {
   advanceShipmentStage,
@@ -20,6 +20,7 @@ import {
   shipmentStatusFromStage,
   stageColor,
   stageLabel,
+  stageProofLabel,
   stageProgress,
 } from '../../utils/routingService';
 
@@ -62,16 +63,33 @@ const getAdvanceLabel = (shipment: any) => {
   return labels[stage] || 'Advance';
 };
 
+const EXCEPTION_TYPES = [
+  { key: 'delayed',          label: 'Mark Delayed',           color: '#F59E0B', note: 'Shipment is delayed due to external factors.' },
+  { key: 'failed_pickup',    label: 'Failed Pickup',          color: '#DC2626', note: 'Rider could not collect the parcel from sender.' },
+  { key: 'failed_delivery',  label: 'Failed Delivery',        color: '#DC2626', note: 'Delivery attempt was unsuccessful.' },
+  { key: 'damaged',          label: 'Damaged Parcel',         color: '#7C3AED', note: 'Parcel reported as damaged during transit.' },
+  { key: 'unavailable',      label: 'Customer Unavailable',   color: '#6B7280', note: 'Customer was unreachable at point of delivery.' },
+];
+
 export default function Shipments() {
   const glass = Platform.OS === 'web' ? { backdropFilter: 'blur(16px)' } : {};
   const [searchQuery, setSearchQuery] = useState('');
   const [shipments, setShipments] = useState<any[]>([]);
   const [terminals, setTerminals] = useState<any[]>([]);
   const [timelineEvents, setTimelineEvents] = useState<any[]>([]);
+  const [stageSuggestions, setStageSuggestions] = useState<any[]>([]);
+  const [proofRecords, setProofRecords] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('All');
+  const [suggestionFilter, setSuggestionFilter] = useState<'all'|'pending'|'accepted'|'dismissed'|'low'>('all');
   const [selectedShipment, setSelectedShipment] = useState<any | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [overrideReason, setOverrideReason] = useState('');
+  const [showOverrideInput, setShowOverrideInput] = useState(false);
+  const [proofViewerUrl, setProofViewerUrl] = useState<string | null>(null);
+  const [showExceptionMenu, setShowExceptionMenu] = useState(false);
+  const [hubScanValue, setHubScanValue] = useState('');
+  const [showHubScan, setShowHubScan] = useState(false);
 
   const terminalMap = useMemo(
     () => Object.fromEntries(terminals.map((terminal) => [terminal.id, terminal])),
@@ -111,23 +129,134 @@ export default function Shipments() {
 
   const loadShipmentDetails = async (shipment: any) => {
     setSelectedShipment(shipment);
-    const { data } = await supabase
-      .from('shipment_events')
-      .select('*')
-      .eq('shipment_id', shipment.id)
-      .order('created_at', { ascending: true });
-    setTimelineEvents(data || []);
+    const [{ data: eventData }, { data: suggestionData }, { data: proofData }] = await Promise.all([
+      supabase.from('shipment_events').select('*').eq('shipment_id', shipment.id).order('created_at', { ascending: true }),
+      supabase.from('shipment_stage_suggestions').select('*').eq('shipment_id', shipment.id).order('created_at', { ascending: false }),
+      supabase.from('shipment_stage_proofs').select('*').eq('shipment_id', shipment.id).order('created_at', { ascending: false }),
+    ]);
+    const resolvedProofs = await Promise.all((proofData || []).map(async (proof: any) => {
+      const mediaPath = String(proof?.media_url || '').trim();
+      if (!mediaPath || mediaPath.startsWith('data:') || mediaPath.startsWith('http://') || mediaPath.startsWith('https://')) {
+        return proof;
+      }
+
+      const { data, error } = await supabase.storage.from('shipment-proofs').createSignedUrl(mediaPath, 60 * 30);
+      if (error || !data?.signedUrl) return { ...proof, media_url: null };
+      return { ...proof, media_url: data.signedUrl };
+    }));
+    setTimelineEvents(eventData || []);
+    setStageSuggestions(suggestionData || []);
+    setProofRecords(resolvedProofs);
+    setOverrideReason('');
+    setShowOverrideInput(false);
+    setShowExceptionMenu(false);
+    setShowHubScan(false);
   };
 
-  const handleAdvance = async (shipment: any) => {
+  const handleApplySuggestion = async (shipment: any, suggestion: any) => {
     setBusyId(shipment.id);
+    try {
+      const actionable = (
+        (shipment.dispatch_stage === 'awaiting_source_terminal' && suggestion.suggested_stage === 'received_at_source_terminal')
+        || (shipment.dispatch_stage === 'linehaul_in_transit' && suggestion.suggested_stage === 'received_at_destination_terminal')
+      );
+
+      if (!actionable) return;
+
+      await advanceShipmentStage(
+        shipment.id,
+        shipment.dispatch_stage || 'pending_routing',
+        shipment.routing_mode || 'last_mile_local',
+        undefined,
+        'admin',
+        {
+          locationName:
+            suggestion.suggested_stage === 'received_at_source_terminal'
+              ? terminalMap[shipment.source_terminal_id]?.name
+              : terminalMap[shipment.destination_terminal_id]?.name,
+          notes: `Admin accepted smart suggestion: ${suggestion.title || suggestion.suggested_stage}.`,
+          proofs: [
+            {
+              stage: suggestion.suggested_stage,
+              proof_type: 'gps_geofence',
+              notes: suggestion.message || 'Geofence suggestion accepted by admin.',
+              confidence_score: Number(suggestion.confidence_score || 0.8),
+              metadata: suggestion.metadata || {},
+            },
+          ],
+        }
+      );
+
+      await supabase
+        .from('shipment_stage_suggestions')
+        .update({
+          suggestion_status: 'accepted',
+          resolved_at: new Date().toISOString(),
+        })
+        .eq('id', suggestion.id);
+
+      await loadShipments();
+      const refreshed = shipments.find((item) => item.id === shipment.id) || shipment;
+      await loadShipmentDetails(refreshed);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleDismissSuggestion = async (suggestion: any) => {
+    await supabase
+      .from('shipment_stage_suggestions')
+      .update({ suggestion_status: 'dismissed', resolved_at: new Date().toISOString() })
+      .eq('id', suggestion.id);
+    if (selectedShipment) await loadShipmentDetails(selectedShipment);
+  };
+
+  const handleAdvance = async (shipment: any, reason?: string) => {
+    const finalReason = reason || overrideReason.trim() || 'Admin advanced shipment through the controlled dispatch flow.';
+    setBusyId(shipment.id);
+    setShowOverrideInput(false);
     try {
       await advanceShipmentStage(
         shipment.id,
         shipment.dispatch_stage || 'pending_routing',
         shipment.routing_mode || 'last_mile_local',
         undefined,
-        'admin'
+        'admin',
+        {
+          locationName:
+            shipment.dispatch_stage === 'awaiting_source_terminal'
+              ? terminalMap[shipment.source_terminal_id]?.name
+              : shipment.dispatch_stage === 'linehaul_in_transit' || shipment.dispatch_stage === 'received_at_destination_terminal'
+                ? terminalMap[shipment.destination_terminal_id]?.name
+                : shipment.delivery_address || shipment.delivery_state,
+          notes: finalReason,
+          proofs: [
+            {
+              stage: shipment.dispatch_stage === 'pending_routing'
+                ? 'awaiting_rider_acceptance'
+                : shipment.dispatch_stage === 'awaiting_rider_acceptance'
+                  ? shipment.routing_mode === 'relay_terminal' ? 'awaiting_source_terminal' : 'out_for_delivery'
+                  : shipment.dispatch_stage === 'awaiting_source_terminal'
+                    ? 'received_at_source_terminal'
+                    : shipment.dispatch_stage === 'received_at_source_terminal'
+                      ? 'linehaul_in_transit'
+                      : shipment.dispatch_stage === 'linehaul_in_transit'
+                        ? 'received_at_destination_terminal'
+                        : shipment.dispatch_stage === 'received_at_destination_terminal'
+                          ? 'awaiting_final_mile_rider'
+                          : shipment.dispatch_stage === 'awaiting_final_mile_rider'
+                            ? 'out_for_delivery'
+                            : 'delivered',
+              proof_type: shipment.dispatch_stage === 'awaiting_source_terminal' || shipment.dispatch_stage === 'linehaul_in_transit'
+                ? 'hub_check_in'
+                : shipment.dispatch_stage === 'received_at_source_terminal' || shipment.dispatch_stage === 'received_at_destination_terminal'
+                  ? 'hub_release'
+                  : 'admin_override',
+              notes: 'Admin console recorded a stage proof for this transition.',
+              confidence_score: shipment.dispatch_stage === 'out_for_delivery' ? 0.72 : 0.8,
+            },
+          ],
+        }
       );
       await loadShipments();
       if (selectedShipment?.id === shipment.id) {
@@ -177,23 +306,33 @@ export default function Shipments() {
     }
   };
 
-  const handleSetException = async (shipment: any) => {
+  const handleSetException = async (shipment: any, exceptionKey: string) => {
+    const exc = EXCEPTION_TYPES.find(e => e.key === exceptionKey);
+    if (!exc) return;
     setBusyId(shipment.id);
+    setShowExceptionMenu(false);
     try {
       await supabase
         .from('shipments')
-        .update({
-          dispatch_stage: 'exception',
-          status: 'Exception',
-          updated_at: new Date().toISOString(),
-        })
+        .update({ dispatch_stage: 'exception', status: 'Exception', updated_at: new Date().toISOString() })
         .eq('id', shipment.id);
-      await logShipmentEvent(shipment.id, 'exception', undefined, undefined, 'admin', 'Admin flagged shipment for exception handling.');
+      await logShipmentEvent(
+        shipment.id, 'exception', undefined, undefined, 'admin',
+        `[${exc.label}] ${exc.note}${overrideReason ? ` — ${overrideReason}` : ''}`,
+      );
       await loadShipments();
+      if (selectedShipment?.id === shipment.id) await loadShipmentDetails(shipment);
     } finally {
       setBusyId(null);
     }
   };
+
+  const canApplySuggestion = (shipment: any, suggestion: any) => (
+    suggestion?.suggestion_status === 'pending' && (
+      (shipment.dispatch_stage === 'awaiting_source_terminal' && suggestion.suggested_stage === 'received_at_source_terminal')
+      || (shipment.dispatch_stage === 'linehaul_in_transit' && suggestion.suggested_stage === 'received_at_destination_terminal')
+    )
+  );
 
   return (
     <View style={styles.container}>
@@ -346,29 +485,185 @@ export default function Shipments() {
                 </View>
 
                 <View style={styles.modalActions}>
-                  <Pressable
-                    style={styles.modalActionPrimary}
-                    onPress={() => handleAdvance(selectedShipment)}
-                    disabled={busyId === selectedShipment.id}
-                  >
-                    <Text style={styles.modalActionPrimaryText}>{busyId === selectedShipment.id ? 'Working...' : getAdvanceLabel(selectedShipment)}</Text>
-                  </Pressable>
-                  <Pressable
-                    style={styles.modalActionSecondary}
-                    onPress={() => handleReroute(selectedShipment)}
-                    disabled={busyId === selectedShipment.id}
-                  >
+                  {/* Override reason input */}
+                  {showOverrideInput ? (
+                    <View style={{ width: '100%', marginBottom: 12 }}>
+                      <TextInput
+                        style={styles.overrideInput}
+                        placeholder="Enter reason for this admin action..."
+                        placeholderTextColor="#9ca3af"
+                        value={overrideReason}
+                        onChangeText={setOverrideReason}
+                        multiline
+                      />
+                      <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+                        <Pressable style={styles.modalActionPrimary} onPress={() => handleAdvance(selectedShipment)} disabled={busyId === selectedShipment.id}>
+                          <Text style={styles.modalActionPrimaryText}>{busyId === selectedShipment.id ? 'Working...' : `Confirm: ${getAdvanceLabel(selectedShipment)}`}</Text>
+                        </Pressable>
+                        <Pressable style={styles.modalActionSecondary} onPress={() => setShowOverrideInput(false)}>
+                          <Text style={styles.modalActionSecondaryText}>Cancel</Text>
+                        </Pressable>
+                      </View>
+                    </View>
+                  ) : (
+                    <Pressable style={styles.modalActionPrimary} onPress={() => setShowOverrideInput(true)} disabled={busyId === selectedShipment.id}>
+                      <Text style={styles.modalActionPrimaryText}>{busyId === selectedShipment.id ? 'Working...' : getAdvanceLabel(selectedShipment)}</Text>
+                    </Pressable>
+                  )}
+                  <Pressable style={styles.modalActionSecondary} onPress={() => handleReroute(selectedShipment)} disabled={busyId === selectedShipment.id}>
                     <Text style={styles.modalActionSecondaryText}>Re-run Routing</Text>
                   </Pressable>
-                  <Pressable
-                    style={styles.modalActionDanger}
-                    onPress={() => handleSetException(selectedShipment)}
-                    disabled={busyId === selectedShipment.id}
-                  >
+                  {/* Exception workflow menu */}
+                  <Pressable style={styles.modalActionDanger} onPress={() => setShowExceptionMenu(v => !v)} disabled={busyId === selectedShipment.id}>
                     <AlertTriangle size={15} color="#fff" />
-                    <Text style={styles.modalActionDangerText}>Mark Exception</Text>
+                    <Text style={styles.modalActionDangerText}>Exception ▾</Text>
+                  </Pressable>
+                  {/* Hub scan toggle */}
+                  <Pressable style={[styles.modalActionSecondary, { borderColor: '#3B82F6' }]} onPress={() => setShowHubScan(v => !v)}>
+                    <ScanLine size={15} color="#3B82F6" />
+                    <Text style={[styles.modalActionSecondaryText, { color: '#3B82F6' }]}>Hub Scan</Text>
                   </Pressable>
                 </View>
+
+                {/* Exception type menu */}
+                {showExceptionMenu && (
+                  <View style={styles.exceptionMenu}>
+                    <Text style={styles.exceptionMenuTitle}>Select Exception Type</Text>
+                    <TextInput
+                      style={[styles.overrideInput, { marginBottom: 10 }]}
+                      placeholder="Optional: describe what happened..."
+                      placeholderTextColor="#9ca3af"
+                      value={overrideReason}
+                      onChangeText={setOverrideReason}
+                    />
+                    {EXCEPTION_TYPES.map(exc => (
+                      <Pressable key={exc.key} style={[styles.exceptionTypeBtn, { borderColor: exc.color + '55' }]} onPress={() => handleSetException(selectedShipment, exc.key)} disabled={busyId === selectedShipment.id}>
+                        <View style={[styles.exceptionTypeDot, { backgroundColor: exc.color }]} />
+                        <Text style={[styles.exceptionTypeText, { color: exc.color }]}>{exc.label}</Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                )}
+
+                {/* Hub scan panel */}
+                {showHubScan && (
+                  <View style={styles.hubScanPanel}>
+                    <Text style={styles.hubScanTitle}>Terminal Hub Scan</Text>
+                    <Text style={styles.hubScanSub}>Scan or type the parcel QR / barcode value to log a hub check-in event.</Text>
+                    <View style={{ flexDirection: 'row', gap: 10, marginTop: 10 }}>
+                      <TextInput
+                        style={[styles.overrideInput, { flex: 1 }]}
+                        placeholder="Paste QR / barcode value..."
+                        placeholderTextColor="#9ca3af"
+                        value={hubScanValue}
+                        onChangeText={setHubScanValue}
+                      />
+                      <Pressable
+                        style={[styles.modalActionPrimary, { alignSelf: 'flex-start' }]}
+                        onPress={async () => {
+                          if (!hubScanValue.trim() || !selectedShipment) return;
+                          await logShipmentEvent(selectedShipment.id, selectedShipment.dispatch_stage || 'exception', undefined, undefined, 'admin', `Hub scan recorded: ${hubScanValue.trim()}`);
+                          setHubScanValue('');
+                          await loadShipmentDetails(selectedShipment);
+                        }}
+                      >
+                        <Text style={styles.modalActionPrimaryText}>Log Scan</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                )}
+
+                {/* Suggestion filter tabs */}
+                <View style={styles.suggestionFilterRow}>
+                  {(['all','pending','accepted','dismissed','low'] as const).map(f => (
+                    <Pressable key={f} style={[styles.suggFilterChip, suggestionFilter === f && styles.suggFilterChipActive]} onPress={() => setSuggestionFilter(f)}>
+                      <Text style={[styles.suggFilterText, suggestionFilter === f && { color: '#002B22' }]}>
+                        {f === 'low' ? 'Low Confidence' : f.charAt(0).toUpperCase() + f.slice(1)}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                <Text style={styles.timelineTitle}>Smart Suggestions</Text>
+                {(() => {
+                  const filtered = stageSuggestions.filter(s => {
+                    if (suggestionFilter === 'all') return true;
+                    if (suggestionFilter === 'low') return Number(s.confidence_score || 0) < 0.7;
+                    return s.suggestion_status === suggestionFilter;
+                  });
+                  if (filtered.length === 0) return <Text style={styles.timelineEmpty}>No suggestions match this filter.</Text>;
+                  return (
+                    <View style={styles.suggestionsWrap}>
+                      {filtered.map((suggestion) => {
+                        const actionable = canApplySuggestion(selectedShipment, suggestion);
+                        const isPending = suggestion.suggestion_status === 'pending';
+                        const statusTone = suggestion.suggestion_status === 'accepted'
+                          ? styles.suggestionAccepted
+                          : suggestion.suggestion_status === 'dismissed'
+                            ? styles.suggestionDismissed
+                            : styles.suggestionPending;
+                        return (
+                          <View key={suggestion.id} style={styles.suggestionCard}>
+                            <View style={styles.suggestionHeader}>
+                              <View style={{ flex: 1 }}>
+                                <Text style={styles.suggestionTitle}>{suggestion.title || stageLabel(suggestion.suggested_stage || 'pending_routing')}</Text>
+                                <Text style={styles.suggestionMeta}>
+                                  {stageLabel(suggestion.suggested_stage || 'pending_routing')} • {(Number(suggestion.confidence_score || 0) * 100).toFixed(0)}% confidence
+                                  {Number(suggestion.confidence_score || 0) < 0.7 ? ' ⚠️ Low' : ''}
+                                </Text>
+                              </View>
+                              <View style={[styles.suggestionBadge, statusTone]}>
+                                <Text style={styles.suggestionBadgeText}>{String(suggestion.suggestion_status || 'pending').replace('_', ' ')}</Text>
+                              </View>
+                            </View>
+                            <Text style={styles.suggestionBody}>{suggestion.message || 'Smart location signal recorded for review.'}</Text>
+                            <Text style={styles.suggestionMeta}>Source: {suggestion.source || 'system'}{suggestion.metadata?.terminal_code ? ` • Terminal ${suggestion.metadata.terminal_code}` : ''}</Text>
+                            <View style={{ flexDirection: 'row', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
+                              {actionable && (
+                                <Pressable style={styles.suggestionAction} onPress={() => handleApplySuggestion(selectedShipment, suggestion)} disabled={busyId === selectedShipment.id}>
+                                  <CheckCircle size={13} color="#fff" />
+                                  <Text style={styles.suggestionActionText}>{busyId === selectedShipment.id ? 'Applying...' : 'Accept'}</Text>
+                                </Pressable>
+                              )}
+                              {isPending && (
+                                <Pressable style={styles.suggestionDismissBtn} onPress={() => handleDismissSuggestion(suggestion)}>
+                                  <XCircle size={13} color="#6B7280" />
+                                  <Text style={styles.suggestionDismissBtnText}>Dismiss</Text>
+                                </Pressable>
+                              )}
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  );
+                })()}
+
+                <Text style={styles.timelineTitle}>Proof History</Text>
+                {proofRecords.length === 0 ? (
+                  <Text style={styles.timelineEmpty}>No stage proofs have been submitted for this shipment.</Text>
+                ) : (
+                  <View style={styles.suggestionsWrap}>
+                    {proofRecords.map((proof, i) => (
+                      <View key={proof.id || i} style={[styles.suggestionCard, { backgroundColor: '#f0fdf4' }]}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+                          <View style={[styles.exceptionTypeDot, { backgroundColor: stageColor(proof.stage || 'pending_routing') }]} />
+                          <Text style={styles.suggestionTitle}>{stageProofLabel(proof.proof_type)} — {stageLabel(proof.stage || 'pending_routing')}</Text>
+                          {proof.media_url && (
+                            <Pressable onPress={() => setProofViewerUrl(proof.media_url)} style={styles.proofPhotoBtn}>
+                              <ImageIcon size={14} color="#047857" />
+                              <Text style={styles.proofPhotoBtnText}>View Photo</Text>
+                            </Pressable>
+                          )}
+                        </View>
+                        <Text style={styles.suggestionMeta}>
+                          {(proof.verified_by_role || 'system').replace(/_/g,' ')} • {(Number(proof.confidence_score || 0)*100).toFixed(0)}% • {formatDate(proof.created_at)}
+                        </Text>
+                        {proof.notes ? <Text style={[styles.suggestionBody, { marginTop: 4 }]}>{proof.notes}</Text> : null}
+                      </View>
+                    ))}
+                  </View>
+                )}
 
                 <Text style={styles.timelineTitle}>Shipment Timeline</Text>
                 {timelineEvents.length === 0 ? (
@@ -389,6 +684,16 @@ export default function Shipments() {
             )}
           </View>
         </View>
+      </Modal>
+
+      {/* Proof photo viewer */}
+      <Modal visible={!!proofViewerUrl} transparent animationType="fade" onRequestClose={() => setProofViewerUrl(null)}>
+        <Pressable style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.88)', alignItems: 'center', justifyContent: 'center' }} onPress={() => setProofViewerUrl(null)}>
+          {Platform.OS === 'web' && proofViewerUrl ? (
+            React.createElement('img', { src: proofViewerUrl, style: { maxWidth: '90%', maxHeight: '88vh', borderRadius: 12, objectFit: 'contain' } })
+          ) : null}
+          <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 13, marginTop: 16 }}>Tap anywhere to close</Text>
+        </Pressable>
       </Modal>
     </View>
   );
@@ -445,6 +750,41 @@ const styles = StyleSheet.create({
   modalActionDangerText: { color: '#fff', fontWeight: '800', fontSize: 13 },
   timelineTitle: { fontSize: 16, fontWeight: '800', color: '#111827', marginBottom: 14 },
   timelineEmpty: { fontSize: 14, color: '#6b7280' },
+  suggestionsWrap: { gap: 12, marginBottom: 24 },
+  suggestionCard: { borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 16, backgroundColor: '#FAFAF7', padding: 16 },
+  suggestionHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, marginBottom: 8 },
+  suggestionTitle: { fontSize: 15, fontWeight: '800', color: '#111827' },
+  suggestionBody: { fontSize: 13, color: '#374151', lineHeight: 20, marginBottom: 8 },
+  suggestionMeta: { fontSize: 12, color: '#6B7280' },
+  suggestionBadge: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, borderWidth: 1 },
+  suggestionPending: { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' },
+  suggestionAccepted: { backgroundColor: '#EEF2FF', borderColor: '#C7D2FE' },
+  suggestionDismissed: { backgroundColor: '#F3F4F6', borderColor: '#E5E7EB' },
+  suggestionBadgeText: { fontSize: 11, fontWeight: '700', color: '#111827', textTransform: 'capitalize' },
+  suggestionAction: { flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start', backgroundColor: BRAND.green, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10 },
+  suggestionActionText: { color: '#fff', fontWeight: '800', fontSize: 12 },
+  suggestionDismissBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, alignSelf: 'flex-start', backgroundColor: '#F3F4F6', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10, borderWidth: 1, borderColor: '#E5E7EB' },
+  suggestionDismissBtnText: { color: '#6B7280', fontWeight: '700', fontSize: 12 },
+  // Suggestion filter
+  suggestionFilterRow: { flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginBottom: 16 },
+  suggFilterChip: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999, borderWidth: 1, borderColor: '#E5E7EB', backgroundColor: '#F9FAFB' },
+  suggFilterChipActive: { backgroundColor: BRAND.lime, borderColor: BRAND.lime },
+  suggFilterText: { fontSize: 12, fontWeight: '700', color: '#374151' },
+  // Override input
+  overrideInput: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 10, padding: 12, fontSize: 13, color: '#111827', outlineStyle: 'none' as any, width: '100%' },
+  // Exception menu
+  exceptionMenu: { backgroundColor: '#FEF2F2', borderRadius: 14, borderWidth: 1, borderColor: '#FECACA', padding: 16, marginBottom: 20, gap: 8 },
+  exceptionMenuTitle: { fontSize: 14, fontWeight: '800', color: '#991B1B', marginBottom: 8 },
+  exceptionTypeBtn: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: '#fff', borderRadius: 10, borderWidth: 1, paddingHorizontal: 14, paddingVertical: 11 },
+  exceptionTypeDot: { width: 10, height: 10, borderRadius: 5 },
+  exceptionTypeText: { fontWeight: '700', fontSize: 13 },
+  // Hub scan
+  hubScanPanel: { backgroundColor: '#EFF6FF', borderRadius: 14, borderWidth: 1, borderColor: '#BFDBFE', padding: 16, marginBottom: 20 },
+  hubScanTitle: { fontSize: 14, fontWeight: '800', color: '#1E40AF', marginBottom: 4 },
+  hubScanSub: { fontSize: 13, color: '#3B82F6', lineHeight: 20 },
+  // Proof photo viewer button
+  proofPhotoBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#ECFDF5', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: '#A7F3D0' },
+  proofPhotoBtnText: { fontSize: 12, fontWeight: '700', color: '#047857' },
   timelineRow: { flexDirection: 'row', gap: 12, marginBottom: 14, alignItems: 'flex-start' },
   timelineDot: { width: 12, height: 12, borderRadius: 6, marginTop: 5 },
   timelineEvent: { fontSize: 14, fontWeight: '700', color: '#111827' },

@@ -24,12 +24,13 @@ import {
   Truck,
   List,
   MapPin,
-  Car,
   Users,
   User,
   BarChart2,
   CircleDollarSign,
   LogOut,
+  Sprout,
+  MailWarning,
 } from 'lucide-react-native';
 import { BRAND } from '../../constants/Theme';
 import { supabase } from '../../supabase';
@@ -41,20 +42,16 @@ const SIDEBAR_MENUS = [
   { key: 'shipments',       label: 'Shipments',          icon: Truck },
   { key: 'track_shipments', label: 'Track Shipments',    icon: MapPin },
   { key: 'terminals',       label: 'Terminals',          icon: List },
-  { key: 'fleet',           label: 'Fleet Management',   icon: Car },
   { key: 'riders',          label: 'Riders & Drivers',   icon: Users },
+  { key: 'agro',            label: 'Agro Transport',     icon: Sprout },
   { key: 'customers',       label: 'Customers',          icon: User },
+  { key: 'notif_queue',     label: 'Notification Queue', icon: MailWarning },
   { key: 'analytics',       label: 'Analytics & Reports',icon: BarChart2 },
   { key: 'earnings',        label: 'Earnings & Finance', icon: CircleDollarSign },
   { key: 'settings',        label: 'Settings',           icon: Settings },
 ];
 
-const TOP_NAV_MENUS = [
-  { key: 'shipments', label: 'Shipments' },
-  { key: 'fleet',     label: 'Fleet Management' },
-  { key: 'riders',    label: 'Riders' },
-  { key: 'earnings',  label: 'Earnings' },
-];
+
 
 /* ─── Notification helpers ────────────────────────────────── */
 /** Insert a notification row into admin_notifications */
@@ -348,19 +345,6 @@ export default function AdminLayout({ children, currentMenu = 'dashboard', onMen
                 <List size={18} color={BRAND.text} />
               </TouchableOpacity>
             )}
-            <View style={[styles.topNavLinks, isMobile && styles.topNavLinksMobile]}>
-              {TOP_NAV_MENUS.map((nav) => (
-                <TouchableOpacity
-                  key={nav.key}
-                  style={[styles.topNavLink, currentMenu === nav.key && styles.topNavLinkActive]}
-                  onPress={() => onMenuChange && onMenuChange(nav.key)}
-                >
-                  <Text style={[styles.topNavLinkText, currentMenu === nav.key && styles.topNavLinkTextActive]}>
-                    {nav.label}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
           </View>
 
           <View style={[styles.topNavRight, isMobile && styles.topNavRightMobile]}>
