@@ -521,3 +521,123 @@ export async function saveAdminSettings(settings: Record<string, any>) {
 
   return settings;
 }
+
+/* ─── Agro Transport Data ─────────────────────────────── */
+
+const PRODUCE_LABELS: Record<string, string> = {
+  grains_cereals:      'Grains & Cereals',
+  tubers_roots:        'Tubers & Roots',
+  vegetables_leafy:    'Leafy Vegetables',
+  vegetables_fruiting: 'Fruiting Vegetables',
+  fruits_tropical:     'Tropical Fruits',
+  livestock_poultry:   'Livestock / Poultry',
+  livestock_cattle:    'Cattle',
+  fish_seafood:        'Fish & Seafood',
+  agro_inputs:         'Agro Inputs',
+  processed_foods:     'Processed Foods',
+  perishables_mixed:   'Mixed Perishables',
+};
+
+const VEHICLE_LABELS: Record<string, string> = {
+  open_truck:         'Open Truck',
+  covered_van:        'Covered Van',
+  refrigerated_truck: 'Refrigerated Truck',
+  flatbed_trailer:    'Flatbed Trailer',
+  pickup_van:         'Pickup Van',
+  motorcycle_box:     'Motorcycle Box',
+};
+
+const AGRO_ACTIVE_STAGES = [
+  'awaiting_rider_acceptance',
+  'awaiting_source_terminal',
+  'received_at_source_terminal',
+  'linehaul_in_transit',
+  'received_at_destination_terminal',
+  'awaiting_final_mile_rider',
+  'out_for_delivery',
+];
+
+const AGRO_COLORS = [
+  '#10B981', '#3B82F6', '#F59E0B', '#7C3AED',
+  '#DC2626', '#0EA5E9', '#84CC16', '#EC4899',
+  '#14B8A6', '#F97316', '#6366F1',
+];
+
+export async function fetchAgroData() {
+  const [{ data: shipments }, { data: terminals }] = await Promise.all([
+    supabase
+      .from('shipments')
+      .select(
+        'id, tracking_id, sender_name, recipient_name, pickup_state, delivery_state, ' +
+        'dispatch_stage, status, estimated_price, created_at, updated_at, ' +
+        'is_agro_shipment, agro_produce_category, agro_vehicle_type, agro_tonnage, ' +
+        'agro_insured, agro_handling_notes, requires_cold_chain'
+      )
+      .eq('is_agro_shipment', true)
+      .order('created_at', { ascending: false }),
+    supabase
+      .from('terminals')
+      .select('id, name, code, city, state, is_agro_ready, agro_capacity_tonnes')
+      .eq('is_agro_ready', true),
+  ]);
+
+  const agroShipments = shipments || [];
+  const agroTerminals = terminals || [];
+
+  // ── Stats ──────────────────────────────────────────────
+  const active     = agroShipments.filter((s: any) => AGRO_ACTIVE_STAGES.includes(s.dispatch_stage));
+  const coldChain  = agroShipments.filter((s: any) => s.requires_cold_chain);
+  const insured    = agroShipments.filter((s: any) => s.agro_insured);
+  const exceptions = agroShipments.filter((s: any) => s.dispatch_stage === 'exception');
+
+  // ── Produce category breakdown ─────────────────────────
+  const produceCounts: Record<string, number> = {};
+  agroShipments.forEach((s: any) => {
+    const key = s.agro_produce_category || 'unknown';
+    produceCounts[key] = (produceCounts[key] || 0) + 1;
+  });
+  const produceBreakdown = Object.entries(produceCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([key, count], idx) => ({
+      label: PRODUCE_LABELS[key] || key,
+      count,
+      color: AGRO_COLORS[idx % AGRO_COLORS.length],
+    }));
+
+  // ── Vehicle type demand ────────────────────────────────
+  const vehicleCounts: Record<string, number> = {};
+  agroShipments.forEach((s: any) => {
+    const key = s.agro_vehicle_type || 'unknown';
+    vehicleCounts[key] = (vehicleCounts[key] || 0) + 1;
+  });
+  const vehicleDemand = Object.entries(vehicleCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([key, count]) => ({
+      label: VEHICLE_LABELS[key] || key,
+      count,
+    }));
+
+  // ── Agro terminal load ─────────────────────────────────
+  const terminalRows = agroTerminals.map((t: any) => ({
+    ...t,
+    agroJobsHere: agroShipments.filter(
+      (s: any) =>
+        AGRO_ACTIVE_STAGES.includes(s.dispatch_stage) &&
+        (s.source_terminal_id === t.id || s.destination_terminal_id === t.id)
+    ).length,
+  }));
+
+  return {
+    stats: {
+      total:      agroShipments.length,
+      active:     active.length,
+      coldChain:  coldChain.length,
+      insured:    insured.length,
+      exceptions: exceptions.length,
+    },
+    produceBreakdown,
+    vehicleDemand,
+    agroTerminals: terminalRows,
+    shipments: agroShipments,
+  };
+}

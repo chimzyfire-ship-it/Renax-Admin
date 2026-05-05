@@ -55,7 +55,39 @@ export default function Terminals() {
         shipment.dispatch_stage || 'pending_routing',
         shipment.routing_mode || 'relay_terminal',
         undefined,
-        'admin'
+        'admin',
+        {
+          locationName: shipment.dispatch_stage === 'awaiting_source_terminal'
+            ? terminals.find((terminal) => terminal.id === shipment.source_terminal_id)?.name
+            : terminals.find((terminal) => terminal.id === shipment.destination_terminal_id)?.name,
+          notes: shipment.dispatch_stage === 'awaiting_source_terminal'
+            ? 'Terminal staff checked parcel into the source hub queue.'
+            : shipment.dispatch_stage === 'received_at_source_terminal'
+              ? 'Terminal staff released parcel onto linehaul.'
+              : shipment.dispatch_stage === 'linehaul_in_transit'
+                ? 'Terminal staff confirmed arrival at destination hub.'
+                : 'Terminal team advanced the relay milestone.',
+          proofs: [
+            {
+              stage: shipment.dispatch_stage === 'awaiting_source_terminal'
+                ? 'received_at_source_terminal'
+                : shipment.dispatch_stage === 'received_at_source_terminal'
+                  ? 'linehaul_in_transit'
+                  : shipment.dispatch_stage === 'linehaul_in_transit'
+                    ? 'received_at_destination_terminal'
+                    : shipment.dispatch_stage === 'received_at_destination_terminal'
+                      ? 'awaiting_final_mile_rider'
+                      : shipment.dispatch_stage === 'awaiting_final_mile_rider'
+                        ? 'out_for_delivery'
+                        : 'delivered',
+              proof_type: shipment.dispatch_stage === 'received_at_source_terminal' || shipment.dispatch_stage === 'received_at_destination_terminal'
+                ? 'hub_release'
+                : 'hub_check_in',
+              notes: 'Terminal-admin confirmation recorded from dispatch console.',
+              confidence_score: 0.8,
+            },
+          ],
+        }
       );
       await load();
     } finally {
