@@ -3,7 +3,7 @@ import { ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, Text, V
 import { AlertCircle, ArrowUpRight, PackageSearch, RefreshCw, Truck, Users, Warehouse } from 'lucide-react-native';
 import { BRAND } from '../../constants/Theme';
 import { fetchAdminOverview } from '../../utils/adminData';
-import { shipmentStatusFromStage, stageColor, stageLabel } from '../../utils/routingService';
+import { shipmentStatusLabel, stageColor, stageLabel } from '../../utils/routingService';
 import { supabase } from '../../supabase';
 
 const formatAmount = (amount: number) =>
@@ -211,7 +211,7 @@ export default function AdminDashboard() {
                           </Text>
                           <View style={{ flex: 1.2 }}>
                             <Text style={[styles.tableCell, { color }]}>{stageLabel(stage)}</Text>
-                            <Text style={styles.tableMeta}>{shipmentStatusFromStage(stage, routingMode)}</Text>
+                            <Text style={styles.tableMeta}>{shipmentStatusLabel(stage, routingMode)}</Text>
                           </View>
                           <Text style={[styles.tableCell, { flex: 0.9, fontWeight: '700' }]}>{formatAmount(shipment.estimated_price || 0)}</Text>
                         </View>

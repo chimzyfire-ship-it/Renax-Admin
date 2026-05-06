@@ -18,6 +18,7 @@ import {
   logShipmentEvent,
   resolveRouting,
   shipmentStatusFromStage,
+  shipmentStatusLabel,
   stageColor,
   stageLabel,
   stageProofLabel,
@@ -314,7 +315,7 @@ export default function Shipments() {
     try {
       await supabase
         .from('shipments')
-        .update({ dispatch_stage: 'exception', status: 'Exception', updated_at: new Date().toISOString() })
+        .update({ dispatch_stage: 'exception', status: 'exception', updated_at: new Date().toISOString() })
         .eq('id', shipment.id);
       await logShipmentEvent(
         shipment.id, 'exception', undefined, undefined, 'admin',
@@ -402,7 +403,7 @@ export default function Shipments() {
               {filtered.map((item) => {
                 const currentStage = item.dispatch_stage || 'pending_routing';
                 const routingMode = item.routing_mode || 'last_mile_local';
-                const currentStatus = shipmentStatusFromStage(currentStage, routingMode);
+                const currentStatus = shipmentStatusLabel(currentStage, routingMode);
                 const progress = stageProgress(currentStage, routingMode);
                 const color = stageColor(currentStage);
 
@@ -468,7 +469,7 @@ export default function Shipments() {
                   {[
                     ['Routing', selectedShipment.routing_mode === 'relay_terminal' ? 'Terminal Relay' : selectedShipment.routing_mode === 'manual_review' ? 'Manual Review' : 'Local Delivery'],
                     ['Stage', stageLabel(selectedShipment.dispatch_stage || 'pending_routing')],
-                    ['Status', shipmentStatusFromStage(selectedShipment.dispatch_stage || 'pending_routing', selectedShipment.routing_mode || 'last_mile_local')],
+                    ['Status', shipmentStatusLabel(selectedShipment.dispatch_stage || 'pending_routing', selectedShipment.routing_mode || 'last_mile_local')],
                     ['Source Hub', terminalMap[selectedShipment.source_terminal_id]?.name || 'N/A'],
                     ['Destination Hub', terminalMap[selectedShipment.destination_terminal_id]?.name || 'N/A'],
                     ['Pickup', selectedShipment.pickup_address || 'N/A'],

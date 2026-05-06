@@ -14,7 +14,7 @@ import { BRAND } from '../../constants/Theme';
 import { MapPin, RefreshCw, Truck, Wrench, PauseCircle, Search, X } from 'lucide-react-native';
 import { supabase } from '../../supabase';
 import { fetchFleetRows, updateFleetVehicleStatus } from '../../utils/adminData';
-import { shipmentStatusFromStage, stageColor, stageLabel } from '../../utils/routingService';
+import { shipmentStatusLabel, stageColor, stageLabel } from '../../utils/routingService';
 
 const formatDate = (dateStr: string) => {
   if (!dateStr) return 'N/A';
@@ -278,7 +278,7 @@ export default function FleetManagement() {
                     <Text style={styles.assignmentTitle}>{selectedVehicle.currentShipment.trackingId || selectedVehicle.currentShipment.id}</Text>
                     <Text style={styles.assignmentMeta}>{selectedVehicle.currentShipment.route}</Text>
                     <Text style={[styles.assignmentStage, { color: stageColor(selectedVehicle.currentShipment.stage) }]}>
-                      {stageLabel(selectedVehicle.currentShipment.stage)} • {shipmentStatusFromStage(selectedVehicle.currentShipment.stage, 'last_mile_local')}
+                      {stageLabel(selectedVehicle.currentShipment.stage)} • {shipmentStatusLabel(selectedVehicle.currentShipment.stage, 'last_mile_local')}
                     </Text>
                   </View>
                 ) : (

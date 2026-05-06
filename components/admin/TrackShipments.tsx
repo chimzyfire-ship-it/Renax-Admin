@@ -3,7 +3,7 @@ import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, TextInput, Vi
 import { BRAND } from '../../constants/Theme';
 import { MapPin, Search, Truck, Warehouse } from 'lucide-react-native';
 import { supabase } from '../../supabase';
-import { shipmentStatusFromStage, stageColor, stageLabel, stageProgress } from '../../utils/routingService';
+import { shipmentStatusLabel, stageColor, stageLabel, stageProgress } from '../../utils/routingService';
 
 const formatDate = (dateStr: string) => {
   if (!dateStr) return '';
@@ -69,7 +69,7 @@ export default function TrackShipments() {
 
   const stage = shipmentData?.dispatch_stage || 'pending_routing';
   const routingMode = shipmentData?.routing_mode || 'last_mile_local';
-  const currentStatus = shipmentData ? shipmentStatusFromStage(stage, routingMode) : 'Pending Routing';
+  const currentStatus = shipmentData ? shipmentStatusLabel(stage, routingMode) : 'Pending Routing';
   const progress = shipmentData ? stageProgress(stage, routingMode) : 0;
   const currentColor = stageColor(stage);
   const sourceTerminal = terminals.find((terminal) => terminal.id === shipmentData?.source_terminal_id);
