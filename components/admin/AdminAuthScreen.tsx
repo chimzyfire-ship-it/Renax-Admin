@@ -6,6 +6,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Eye, EyeOff, ArrowRight } from 'lucide-react-native';
 import Animated, { FadeInDown, FadeIn } from 'react-native-reanimated';
 import { BRAND } from '../../constants/Theme';
+import { supabase } from '../../supabase';
 
 export default function AdminAuthScreen({ onAuthenticated }) {
   const { width } = useWindowDimensions();
@@ -22,14 +23,35 @@ export default function AdminAuthScreen({ onAuthenticated }) {
   const [showPass, setShowPass] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState('');
 
   if (!fontsLoaded) return null;
 
   const glass = Platform.OS === 'web' ? { backdropFilter: 'blur(24px)' } : {};
 
-  const handleSignIn = () => {
-    // Admin login goes directly in
-    onAuthenticated();
+  const handleSignIn = async () => {
+    if (!email.trim() || !password) {
+      setMessage('Enter your admin email and password.');
+      return;
+    }
+
+    setLoading(true);
+    setMessage('');
+
+    try {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
+
+      if (error) throw error;
+      onAuthenticated?.();
+    } catch (error) {
+      setMessage(error?.message || 'Could not sign in to admin.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -112,13 +134,15 @@ export default function AdminAuthScreen({ onAuthenticated }) {
                 </View>
               </View>
 
-              <Pressable style={styles.authBtn} onPress={handleSignIn}>
-                <Text style={styles.authBtnText}>Authorize Access</Text>
+              <Pressable style={[styles.authBtn, loading && { opacity: 0.7 }]} onPress={handleSignIn} disabled={loading}>
+                <Text style={styles.authBtnText}>{loading ? 'Authorizing...' : 'Authorize Access'}</Text>
                 <ArrowRight color={BRAND.green} size={20} />
               </Pressable>
 
+              {message ? <Text style={styles.message}>{message}</Text> : null}
+
               <View style={styles.securityNote}>
-                 <Text style={styles.securityText}>Protected by enterprise-grade security</Text>
+                 <Text style={styles.securityText}>Protected by enterprise-grade security. Admin accounts must already be provisioned.</Text>
               </View>
             </Animated.View>
           </ScrollView>
@@ -263,6 +287,13 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: BRAND.green,
     letterSpacing: 0.5,
+  },
+  message: {
+    color: '#FCD34D',
+    fontSize: 13,
+    fontFamily: 'Outfit_6',
+    textAlign: 'center',
+    lineHeight: 20,
   },
   securityNote: {
     alignItems: 'center',
