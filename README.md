@@ -1,122 +1,80 @@
-# 📦 OTG Logistics (v1.0)
+# RENAX Admin
 
-**The Next-Generation Last-Mile Delivery Infrastructure.** Built for speed, scale, and real-time fleet command.
+RENAX Admin is the operations command center for the RENAX logistics network. It is built for dispatch, support, and ops teams who need a live picture of shipment flow, rider activity, terminal pressure, exceptions, and delivery performance from one place.
 
-<img width="642" height="1389" alt="IMG_3393" src="https://github.com/user-attachments/assets/73435500-0de6-4bc0-a0e6-f45b1e601d51" />
-<img width="642" height="1389" alt="IMG_3394" src="https://github.com/user-attachments/assets/d0a6ae39-0963-466d-9d4f-f1175fa96064" />
-## 🚀 Overview
+## What this app handles
 
-**OTG (On The Go)** is a full-stack, role-based logistics platform designed to connect Customers, Riders, and Administrators in real-time. Unlike standard courier apps, OTG utilizes a **"Titanium 2025" Dark UI**, persistent local state, and OSRM routing algorithms to deliver a seamless, native experience without heavy API costs.
+- Live operations monitoring across shipments, riders, terminals, and dispatch stages
+- Admin-only access gates using Supabase auth claims
+- Shipment oversight with stage events, proof trails, routing review, and exception handling
+- Rider and driver visibility with availability, assignment context, and terminal alignment
+- Operational alerting through admin notifications, queue monitoring, and monitoring surfaces
+- Back-office views for analytics, earnings, finance, customers, and agro transport workflows
 
-### 📱 One Codebase, Three Ecosystems
-The app intelligently renders different interfaces based on the user's secure role:
-1.  **🦅 Admin Command Center:** A God-mode view of the entire fleet, revenue, and active missions.
-2.  **🛵 Rider Workstation:** A focused, map-based interface for job acceptance, navigation, and earnings.
-3.  **📦 Customer Portal:** A clean, glassmorphic interface for booking goods/document delivery and live tracking.
+## Product highlights
 
----
+- Real-time dashboard for active shipments, riders online, revenue today, relay load, and exceptions
+- Dispatch breakdown for first-mile, linehaul, destination hub, and final-mile progress
+- Terminal load snapshots to spot intake pressure and handoff bottlenecks
+- Rider roster with live availability, location context, and assignment status
+- Notification queue and ops alert surfaces tied to shipment and delivery events
+- Shared routing logic for both local deliveries and cross-state terminal relay journeys
 
-## ✨ Key Features
+## Stack
 
-### 🦅 Admin Side (Command Center)
-* **Live Fleet Tracking:** Monitor riders in real-time on a global map (🟢 Online / ⚪️ Offline).
-* **Retractable Command Deck:** Fluid sliding panel to toggle between Map View and Data Tables.
-* **Revenue Analytics:** Real-time KPI cards for Revenue, Active Missions, and Fleet Size.
-* **Mission History:** Complete ledger of all accepted, pending, and completed jobs.
-<img width="642" height="1389" alt="IMG_3395" src="https://github.com/user-attachments/assets/1d00b66e-c323-41aa-87e2-0455f3bb9eaa" />
-<img width="642" height="1389" alt="IMG_3396" src="https://github.com/user-attachments/assets/07fbb972-8f47-46ac-ae6c-543fa177c860" />
+- Expo + React Native + Expo Router
+- TypeScript
+- Supabase Auth, Postgres, and Realtime
+- React Native Maps and web map support
+- Expo web export support for browser-based operations access
 
-### 🛵 Rider Side (Logistics Partner)
-* **Ghost Mode Map:** Always-on map background that dims when Offline.
-* **Smart Job Queue:** Proximity-based job sorting (e.g., "Pickup is 2.4km away").
-* **Real-Time Earnings:** Weekly performance graphs and acceptance rate stats based on actual completed jobs.
-* **Persistent State:** App remembers "Online/Offline" status even after restarts (AsyncStorage).
-<img width="642" height="1389" alt="IMG_3406" src="https://github.com/user-attachments/assets/2661179c-0fb6-43d5-83b9-b5b180ddabce" />
-<img width="642" height="1389" alt="IMG_3407" src="https://github.com/user-attachments/assets/e237ca0c-0199-43ab-a6b3-a978a81b6a84" />
-<img width="642" height="1389" alt="IMG_3407" src="https://github.com/user-attachments/assets/1eafa14d-152e-411b-b463-e96b22b826bf" />
+## Project structure
 
-### 📦 Customer Side (Client)
-* **Smart Routing:** Real road geometry drawing using OSRM (Open Source Routing Machine).
-* **Fare Engine:** Automatic price calculation based on real-time distance.
-* **Live Order Tracking:** Step-by-step timeline (Pending -> Assigned -> Arrived -> Completed).
-* **Secure Profile:** Biometric login support and secure Email/Password management.
-<img width="642" height="1389" alt="IMG_3401" src="https://github.com/user-attachments/assets/3c733c6b-bb31-49de-a70b-cc4d4dcd8ff1" />
-<img width="642" height="1389" alt="IMG_3402" src="https://github.com/user-attachments/assets/17dd2aac-830f-4554-ac55-27d19cd860d4" />
-<img width="642" height="1389" alt="IMG_3403" src="https://github.com/user-attachments/assets/59084d08-0f48-4697-ab8e-dd22600bf6f8" />
-<img width="642" height="1389" alt="IMG_3404" src="https://github.com/user-attachments/assets/d79fa4c5-c67d-4ddb-a8d0-05cb8d86f399" />
-<img width="642" height="1389" alt="IMG_3405" src="https://github.com/user-attachments/assets/adc8c48b-9cf6-41df-8b00-9b92cb6b6dbd" />
+- `app/` app entrypoint
+- `components/admin/` admin surfaces such as dashboard, shipments, terminals, riders, and alerts
+- `utils/` routing, admin data shaping, and operational helpers
+- `migrations/` local schema bootstrap and admin notification setup
+- `assets/` application branding and icons
 
----
+## Local setup
 
-## 🛠 Tech Stack
+1. Install dependencies.
+   ```bash
+   npm install
+   ```
+2. Create a `.env` file in the repo root.
+   ```bash
+   EXPO_PUBLIC_SUPABASE_URL=your_supabase_url
+   EXPO_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+   ```
+3. Apply the local admin migrations in order.
+   - `migrations/00_renax_core_setup.sql`
+   - `migrations/01_admin_notifications.sql`
+   - `migrations/02_fix_shipments_status_check.sql`
+   - `migrations/add_is_restricted_to_profiles.sql`
+4. Start the app.
+   ```bash
+   npm run start
+   ```
 
-* **Framework:** [React Native](https://reactnative.dev/) (via [Expo](https://expo.dev))
-* **Backend / Database:** [Supabase](https://supabase.com) (PostgreSQL + Realtime)
-* **Maps & Geospatial:** `react-native-maps`, `expo-location`, OSRM API
-* **State Persistence:** `@react-native-async-storage/async-storage`
-* **UI/UX:** Custom "Titanium" Theme, Glassmorphism, Haptic Feedback, LayoutAnimation
+Helpful commands:
 
----
-
-## ⚙️ Installation & Setup
-
-### 1. Clone the Repository
 ```bash
-git clone [https://github.com/chimzyfire-ship-it/DeliveryApp.git](https://github.com/chimzyfire-ship-it/DeliveryApp.git)
-cd DeliveryApp
-#### 2. Install dependencies
-npm install
-# or
-npx expo install
-### 3. configure supabase
-import { createClient } from '@supabase/supabase-js';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+npm run web
+npm run ios
+npm run android
+npm run lint
+```
 
-const supabaseUrl = 'YOUR_SUPABASE_URL';
-const supabaseAnonKey = 'YOUR_SUPABASE_ANON_KEY';
+## Backend expectations
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  auth: {
-    storage: AsyncStorage,
-    autoRefreshToken: true,
-    persistSession: true,
-    detectSessionInUrl: false,
-  },
-});
-### 4. Database Schema
--- Profiles Table
-create table public.profiles (
-  id uuid references auth.users not null primary key,
-  email text,
-  full_name text,
-  phone_number text,
-  role text check (role in ('customer', 'driver', 'admin')),
-  avatar_url text,
-  home_address text,
-  home_lat float,
-  home_lng float,
-  work_address text,
-  work_lat float,
-  work_lng float,
-  is_online boolean default false
-);
+This app expects a Supabase project with logistics-focused tables such as `profiles`, `shipments`, `terminals`, `rider_locations`, `shipment_events`, `shipment_stage_proofs`, `shipment_stage_suggestions`, `admin_notifications`, `notification_delivery_queue`, and `ops_alerts`.
 
--- Missions (Orders) Table
-create table public.missions (
-  id bigint generated by default as identity primary key,
-  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-  pickup text,
-  pickup_lat float,
-  pickup_lng float,
-  dropoff text,
-  dropoff_lat float,
-  dropoff_lng float,
-  price text,
-  distance_km float,
-  status text default 'pending', -- pending, in_progress, arrived, completed
-  driver_id uuid references public.profiles(id),
-  delivery_pin text,
-  rating int default 5
-);
-### Run the App
-npx expo start
+## Related RENAX repos
+
+- [RENAX Customer](https://github.com/chimzyfire-ship-it/Renax-Customer)
+- [RENAX Rider](https://github.com/chimzyfire-ship-it/Renax-Rider-)
+
+## Summary
+
+RENAX Admin is where RENAX operators manage the network in real time: dispatch decisions, rider visibility, terminal relay flow, notification health, and operational exceptions all come together here.

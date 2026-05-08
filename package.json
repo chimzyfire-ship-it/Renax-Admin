@@ -1,5 +1,6 @@
 {
   "name": "renax-admin",
+  "description": "Operations command center for RENAX logistics with live shipment tracking, rider visibility, terminal oversight, alerts, and dispatch analytics.",
   "main": "expo-router/entry",
   "version": "1.0.0",
   "scripts": {
