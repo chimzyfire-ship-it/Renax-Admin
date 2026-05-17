@@ -29,6 +29,7 @@ const STAGE_FILTERS = [
   'All',
   'pending_routing',
   'awaiting_rider_acceptance',
+  'awaiting_source_terminal_dropoff',
   'awaiting_source_terminal',
   'received_at_source_terminal',
   'linehaul_in_transit',
@@ -54,6 +55,7 @@ const getAdvanceLabel = (shipment: any) => {
   const labels: Record<string, string> = {
     pending_routing: 'Release To Queue',
     awaiting_rider_acceptance: routing === 'relay_terminal' ? 'Assign First Mile' : 'Release Delivery',
+    awaiting_source_terminal_dropoff: 'Receive Customer Drop-Off',
     awaiting_source_terminal: 'Check In Source Hub',
     received_at_source_terminal: 'Dispatch Linehaul',
     linehaul_in_transit: 'Receive At Destination Hub',
@@ -225,7 +227,7 @@ export default function Shipments() {
         'admin',
         {
           locationName:
-            shipment.dispatch_stage === 'awaiting_source_terminal'
+            shipment.dispatch_stage === 'awaiting_source_terminal_dropoff' || shipment.dispatch_stage === 'awaiting_source_terminal'
               ? terminalMap[shipment.source_terminal_id]?.name
               : shipment.dispatch_stage === 'linehaul_in_transit' || shipment.dispatch_stage === 'received_at_destination_terminal'
                 ? terminalMap[shipment.destination_terminal_id]?.name
@@ -234,7 +236,11 @@ export default function Shipments() {
           proofs: [
             {
               stage: shipment.dispatch_stage === 'pending_routing'
-                ? 'awaiting_rider_acceptance'
+                ? shipment.routing_mode === 'relay_terminal' && shipment.relay_first_mile_strategy !== 'renax_pickup'
+                  ? 'awaiting_source_terminal_dropoff'
+                  : 'awaiting_rider_acceptance'
+                : shipment.dispatch_stage === 'awaiting_source_terminal_dropoff'
+                  ? 'received_at_source_terminal'
                 : shipment.dispatch_stage === 'awaiting_rider_acceptance'
                   ? shipment.routing_mode === 'relay_terminal' ? 'awaiting_source_terminal' : 'out_for_delivery'
                   : shipment.dispatch_stage === 'awaiting_source_terminal'
@@ -248,7 +254,7 @@ export default function Shipments() {
                           : shipment.dispatch_stage === 'awaiting_final_mile_rider'
                             ? 'out_for_delivery'
                             : 'delivered',
-              proof_type: shipment.dispatch_stage === 'awaiting_source_terminal' || shipment.dispatch_stage === 'linehaul_in_transit'
+              proof_type: shipment.dispatch_stage === 'awaiting_source_terminal_dropoff' || shipment.dispatch_stage === 'awaiting_source_terminal' || shipment.dispatch_stage === 'linehaul_in_transit'
                 ? 'hub_check_in'
                 : shipment.dispatch_stage === 'received_at_source_terminal' || shipment.dispatch_stage === 'received_at_destination_terminal'
                   ? 'hub_release'
@@ -272,7 +278,9 @@ export default function Shipments() {
   const handleReroute = async (shipment: any) => {
     setBusyId(shipment.id);
     try {
-      const routing = await resolveRouting(shipment.pickup_address || '', shipment.delivery_address || '');
+      const routing = await resolveRouting(shipment.pickup_address || '', shipment.delivery_address || '', {
+        relayFirstMileStrategy: shipment.relay_first_mile_strategy || 'customer_dropoff',
+      });
       const shipmentType = routing.routing_mode === 'relay_terminal' ? 'inter_state' : 'intra_state';
 
       await supabase

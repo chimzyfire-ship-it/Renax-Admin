@@ -169,7 +169,8 @@ export default function AdminDashboard() {
               <Text style={styles.sectionTitle}>Dispatch Breakdown</Text>
               <View style={styles.breakdownGrid}>
                 {[
-                  ['Awaiting Rider', stageBreakdown.awaiting_rider_acceptance || 0, '#F59E0B'],
+                  ['Awaiting Pickup', stageBreakdown.awaiting_rider_acceptance || 0, '#F59E0B'],
+                  ['Awaiting Drop-Off', stageBreakdown.awaiting_source_terminal_dropoff || 0, '#2563EB'],
                   ['At Source Hub', stageBreakdown.at_source_hub || 0, '#7C3AED'],
                   ['Linehaul', stageBreakdown.linehaul || 0, '#4F46E5'],
                   ['Awaiting Final Mile', stageBreakdown.awaiting_final_mile || 0, '#0EA5E9'],

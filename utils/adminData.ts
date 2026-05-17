@@ -3,6 +3,7 @@ import { supabase } from '../supabase';
 
 const ACTIVE_STAGES = [
   'awaiting_rider_acceptance',
+  'awaiting_source_terminal_dropoff',
   'awaiting_source_terminal',
   'received_at_source_terminal',
   'linehaul_in_transit',
@@ -12,6 +13,7 @@ const ACTIVE_STAGES = [
 ];
 
 const TERMINAL_BACKLOG_STAGES = [
+  'awaiting_source_terminal_dropoff',
   'awaiting_source_terminal',
   'received_at_source_terminal',
   'linehaul_in_transit',
@@ -118,6 +120,7 @@ export async function fetchAdminOverview() {
 
   const stageBreakdown = {
     awaiting_rider_acceptance: safeShipments.filter((shipment: any) => shipment.dispatch_stage === 'awaiting_rider_acceptance').length,
+    awaiting_source_terminal_dropoff: safeShipments.filter((shipment: any) => shipment.dispatch_stage === 'awaiting_source_terminal_dropoff').length,
     at_source_hub: safeShipments.filter((shipment: any) => shipment.dispatch_stage === 'received_at_source_terminal').length,
     linehaul: safeShipments.filter((shipment: any) => shipment.dispatch_stage === 'linehaul_in_transit').length,
     awaiting_final_mile: safeShipments.filter((shipment: any) => shipment.dispatch_stage === 'awaiting_final_mile_rider').length,
@@ -127,7 +130,7 @@ export async function fetchAdminOverview() {
 
   const terminalLoads = safeTerminals.map((terminal: any) => ({
     ...terminal,
-    inbound: safeShipments.filter((shipment: any) => shipment.source_terminal_id === terminal.id && shipment.dispatch_stage === 'awaiting_source_terminal').length,
+    inbound: safeShipments.filter((shipment: any) => shipment.source_terminal_id === terminal.id && ['awaiting_source_terminal_dropoff', 'awaiting_source_terminal'].includes(shipment.dispatch_stage)).length,
     atHub: safeShipments.filter((shipment: any) => shipment.source_terminal_id === terminal.id && shipment.dispatch_stage === 'received_at_source_terminal').length,
     destinationQueue: safeShipments.filter((shipment: any) => shipment.destination_terminal_id === terminal.id && shipment.dispatch_stage === 'received_at_destination_terminal').length,
     finalMileQueue: safeShipments.filter((shipment: any) => shipment.destination_terminal_id === terminal.id && shipment.dispatch_stage === 'awaiting_final_mile_rider').length,
@@ -549,6 +552,7 @@ const VEHICLE_LABELS: Record<string, string> = {
 
 const AGRO_ACTIVE_STAGES = [
   'awaiting_rider_acceptance',
+  'awaiting_source_terminal_dropoff',
   'awaiting_source_terminal',
   'received_at_source_terminal',
   'linehaul_in_transit',

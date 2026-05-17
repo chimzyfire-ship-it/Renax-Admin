@@ -31,7 +31,7 @@ export default function Terminals() {
   }, [load]);
 
   const terminalQueues = useMemo(() => terminals.map((terminal) => {
-    const sourceIncoming = shipments.filter((shipment) => shipment.source_terminal_id === terminal.id && shipment.dispatch_stage === 'awaiting_source_terminal');
+    const sourceIncoming = shipments.filter((shipment) => shipment.source_terminal_id === terminal.id && ['awaiting_source_terminal_dropoff', 'awaiting_source_terminal'].includes(shipment.dispatch_stage));
     const sourceReady = shipments.filter((shipment) => shipment.source_terminal_id === terminal.id && shipment.dispatch_stage === 'received_at_source_terminal');
     const destinationIncoming = shipments.filter((shipment) => shipment.destination_terminal_id === terminal.id && shipment.dispatch_stage === 'received_at_destination_terminal');
     const finalMileQueue = shipments.filter((shipment) => shipment.destination_terminal_id === terminal.id && shipment.dispatch_stage === 'awaiting_final_mile_rider');
@@ -58,9 +58,12 @@ export default function Terminals() {
         'admin',
         {
           locationName: shipment.dispatch_stage === 'awaiting_source_terminal'
+            || shipment.dispatch_stage === 'awaiting_source_terminal_dropoff'
             ? terminals.find((terminal) => terminal.id === shipment.source_terminal_id)?.name
             : terminals.find((terminal) => terminal.id === shipment.destination_terminal_id)?.name,
-          notes: shipment.dispatch_stage === 'awaiting_source_terminal'
+          notes: shipment.dispatch_stage === 'awaiting_source_terminal_dropoff'
+            ? 'Terminal staff received a customer drop-off into the source hub queue.'
+            : shipment.dispatch_stage === 'awaiting_source_terminal'
             ? 'Terminal staff checked parcel into the source hub queue.'
             : shipment.dispatch_stage === 'received_at_source_terminal'
               ? 'Terminal staff released parcel onto linehaul.'
@@ -69,7 +72,9 @@ export default function Terminals() {
                 : 'Terminal team advanced the relay milestone.',
           proofs: [
             {
-              stage: shipment.dispatch_stage === 'awaiting_source_terminal'
+              stage: shipment.dispatch_stage === 'awaiting_source_terminal_dropoff'
+                ? 'received_at_source_terminal'
+                : shipment.dispatch_stage === 'awaiting_source_terminal'
                 ? 'received_at_source_terminal'
                 : shipment.dispatch_stage === 'received_at_source_terminal'
                   ? 'linehaul_in_transit'
@@ -159,7 +164,13 @@ export default function Terminals() {
                       </Text>
                     </View>
                     <Pressable style={styles.queueActionBtn} onPress={() => runAdvance(shipment)} disabled={busyId === shipment.id}>
-                      <Text style={styles.queueActionText}>{busyId === shipment.id ? '...' : shipment.dispatch_stage === 'awaiting_source_terminal' ? 'Check In' : 'Dispatch'}</Text>
+                      <Text style={styles.queueActionText}>
+                        {busyId === shipment.id
+                          ? '...'
+                          : ['awaiting_source_terminal_dropoff', 'awaiting_source_terminal'].includes(shipment.dispatch_stage)
+                            ? 'Receive'
+                            : 'Dispatch'}
+                      </Text>
                     </Pressable>
                   </View>
                 ))}
