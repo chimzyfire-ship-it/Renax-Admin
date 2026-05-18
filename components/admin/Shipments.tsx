@@ -52,6 +52,16 @@ const formatDate = (dateStr: string) =>
 const getAdvanceLabel = (shipment: any) => {
   const stage = shipment.dispatch_stage || 'pending_routing';
   const routing = shipment.routing_mode || 'last_mile_local';
+  const isManagedFirstMile =
+    routing === 'relay_terminal' &&
+    shipment?.relay_first_mile_strategy === 'renax_pickup' &&
+    stage === 'awaiting_source_terminal' &&
+    !shipment?.first_mile_pickup_agent_id;
+
+  if (isManagedFirstMile) {
+    return 'Manage Pickup';
+  }
+
   const labels: Record<string, string> = {
     pending_routing: 'Release To Queue',
     awaiting_rider_acceptance: routing === 'relay_terminal' ? 'Assign First Mile' : 'Release Delivery',
@@ -93,6 +103,12 @@ export default function Shipments() {
   const [showExceptionMenu, setShowExceptionMenu] = useState(false);
   const [hubScanValue, setHubScanValue] = useState('');
   const [showHubScan, setShowHubScan] = useState(false);
+  const [pickupQueueRecord, setPickupQueueRecord] = useState<any | null>(null);
+  const [pickupCandidates, setPickupCandidates] = useState<any[]>([]);
+  const [pickupAttempts, setPickupAttempts] = useState<any[]>([]);
+  const [pickupOpsLoading, setPickupOpsLoading] = useState(false);
+  const [pickupOpsBusy, setPickupOpsBusy] = useState<string | null>(null);
+  const [pickupOpsReason, setPickupOpsReason] = useState('');
 
   const terminalMap = useMemo(
     () => Object.fromEntries(terminals.map((terminal) => [terminal.id, terminal])),
@@ -130,6 +146,77 @@ export default function Shipments() {
     return queryMatch && statusMatch;
   }), [shipments, searchQuery, statusFilter]);
 
+  const isManagedFirstMileShipment = (shipment: any) =>
+    shipment?.routing_mode === 'relay_terminal' && shipment?.relay_first_mile_strategy === 'renax_pickup';
+
+  const loadPickupOpsContext = useCallback(async (shipment: any) => {
+    if (!isManagedFirstMileShipment(shipment)) {
+      setPickupQueueRecord(null);
+      setPickupCandidates([]);
+      setPickupAttempts([]);
+      return;
+    }
+
+    setPickupOpsLoading(true);
+    try {
+      const { data: queueRecord } = await supabase
+        .from('first_mile_pickup_request_queue')
+        .select('*')
+        .eq('shipment_id', shipment.id)
+        .maybeSingle();
+
+      setPickupQueueRecord(queueRecord || null);
+
+      if (!queueRecord?.id) {
+        setPickupCandidates([]);
+        setPickupAttempts([]);
+        return;
+      }
+
+      const [{ data: candidateScores }, { data: attemptRows }] = await Promise.all([
+        supabase.rpc('first_mile_pickup_candidates', { p_pickup_request_id: queueRecord.id }),
+        supabase
+          .from('pickup_request_assignment_attempts')
+          .select('*')
+          .eq('pickup_request_id', queueRecord.id)
+          .order('attempt_order', { ascending: false }),
+      ]);
+
+      const agentIds = Array.from(new Set([
+        ...(candidateScores || []).map((row: any) => row.pickup_agent_id),
+        ...(attemptRows || []).map((row: any) => row.pickup_agent_id),
+        queueRecord.assigned_agent_id,
+      ].filter(Boolean)));
+
+      const agentMap = new Map<string, any>();
+
+      if (agentIds.length > 0) {
+        const { data: agentRows } = await supabase
+          .from('first_mile_pickup_pool_live')
+          .select('*')
+          .in('id', agentIds);
+
+        (agentRows || []).forEach((row: any) => {
+          agentMap.set(row.id, row);
+        });
+      }
+
+      setPickupCandidates((candidateScores || []).map((row: any) => ({
+        ...agentMap.get(row.pickup_agent_id),
+        pickup_agent_id: row.pickup_agent_id,
+        score: row.score,
+        candidate_driver_id: row.driver_id,
+      })));
+
+      setPickupAttempts((attemptRows || []).map((row: any) => ({
+        ...row,
+        agent: agentMap.get(row.pickup_agent_id) || null,
+      })));
+    } finally {
+      setPickupOpsLoading(false);
+    }
+  }, []);
+
   const loadShipmentDetails = async (shipment: any) => {
     setSelectedShipment(shipment);
     const [{ data: eventData }, { data: suggestionData }, { data: proofData }] = await Promise.all([
@@ -151,9 +238,11 @@ export default function Shipments() {
     setStageSuggestions(suggestionData || []);
     setProofRecords(resolvedProofs);
     setOverrideReason('');
+    setPickupOpsReason('');
     setShowOverrideInput(false);
     setShowExceptionMenu(false);
     setShowHubScan(false);
+    await loadPickupOpsContext(shipment);
   };
 
   const handleApplySuggestion = async (shipment: any, suggestion: any) => {
@@ -215,6 +304,11 @@ export default function Shipments() {
   };
 
   const handleAdvance = async (shipment: any, reason?: string) => {
+    if (isManagedFirstMileShipment(shipment) && shipment.dispatch_stage === 'awaiting_source_terminal' && !shipment.first_mile_pickup_agent_id) {
+      await loadShipmentDetails(shipment);
+      return;
+    }
+
     const finalReason = reason || overrideReason.trim() || 'Admin advanced shipment through the controlled dispatch flow.';
     setBusyId(shipment.id);
     setShowOverrideInput(false);
@@ -333,6 +427,77 @@ export default function Shipments() {
       if (selectedShipment?.id === shipment.id) await loadShipmentDetails(shipment);
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const reloadShipmentContext = async (shipmentId: string) => {
+    await loadShipments();
+
+    const { data: refreshedShipment } = await supabase
+      .from('shipments')
+      .select('*')
+      .eq('id', shipmentId)
+      .maybeSingle();
+
+    if (refreshedShipment) {
+      await loadShipmentDetails(refreshedShipment);
+    }
+  };
+
+  const handleAssignPickupAgent = async (shipment: any, candidate: any) => {
+    if (!pickupQueueRecord?.id) return;
+
+    const actionKey = `assign:${candidate.pickup_agent_id}`;
+    const reason = pickupOpsReason.trim() || `Ops assigned ${candidate.driver_name || candidate.vehicle_code || 'a pickup agent'} to this first-mile request.`;
+
+    setPickupOpsBusy(actionKey);
+    try {
+      if (pickupQueueRecord.assigned_agent_id && pickupQueueRecord.assigned_agent_id !== candidate.pickup_agent_id) {
+        const { error } = await supabase.rpc('transfer_first_mile_pickup_agent', {
+          p_payload: {
+            pickup_request_id: pickupQueueRecord.id,
+            pickup_agent_id: candidate.pickup_agent_id,
+            reason,
+          },
+        });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.rpc('assign_first_mile_pickup_agent', {
+          p_payload: {
+            pickup_request_id: pickupQueueRecord.id,
+            pickup_agent_id: candidate.pickup_agent_id,
+            offer_reason: reason,
+          },
+        });
+        if (error) throw error;
+      }
+
+      setPickupOpsReason('');
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setPickupOpsBusy(null);
+    }
+  };
+
+  const handleUnassignPickupAgent = async (shipment: any) => {
+    if (!pickupQueueRecord?.id) return;
+
+    const reason = pickupOpsReason.trim() || 'Ops released the current first-mile assignment and returned it to the queue.';
+
+    setPickupOpsBusy('unassign');
+    try {
+      const { error } = await supabase.rpc('unassign_first_mile_pickup_agent', {
+        p_payload: {
+          pickup_request_id: pickupQueueRecord.id,
+          reason,
+        },
+      });
+      if (error) throw error;
+
+      setPickupOpsReason('');
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setPickupOpsBusy(null);
     }
   };
 
@@ -492,6 +657,140 @@ export default function Shipments() {
                     </View>
                   ))}
                 </View>
+
+                {isManagedFirstMileShipment(selectedShipment) && (
+                  <View style={styles.pickupOpsSection}>
+                    <View style={styles.pickupOpsHeader}>
+                      <View>
+                        <Text style={styles.pickupOpsTitle}>First-Mile Pickup Control</Text>
+                        <Text style={styles.pickupOpsSub}>Assign from the dedicated pickup pool, transfer if a driver has issues, or release back to the queue.</Text>
+                      </View>
+                      {pickupOpsLoading ? <ActivityIndicator color={BRAND.green} size="small" /> : null}
+                    </View>
+
+                    {pickupQueueRecord ? (
+                      <>
+                        <View style={styles.pickupOpsSummaryRow}>
+                          <View style={styles.pickupOpsStat}>
+                            <Text style={styles.pickupOpsStatLabel}>Queue Status</Text>
+                            <Text style={styles.pickupOpsStatValue}>{String(pickupQueueRecord.orchestration_status || 'awaiting_assignment').replace(/_/g, ' ')}</Text>
+                          </View>
+                          <View style={styles.pickupOpsStat}>
+                            <Text style={styles.pickupOpsStatLabel}>Priority</Text>
+                            <Text style={styles.pickupOpsStatValue}>{pickupQueueRecord.priority || 'normal'}</Text>
+                          </View>
+                          <View style={styles.pickupOpsStat}>
+                            <Text style={styles.pickupOpsStatLabel}>Attempts</Text>
+                            <Text style={styles.pickupOpsStatValue}>{pickupQueueRecord.assignment_attempt_count || 0}</Text>
+                          </View>
+                          <View style={styles.pickupOpsStat}>
+                            <Text style={styles.pickupOpsStatLabel}>Best Score</Text>
+                            <Text style={styles.pickupOpsStatValue}>{pickupQueueRecord.best_attempt_score || 'N/A'}</Text>
+                          </View>
+                        </View>
+
+                        <View style={styles.pickupOpsAssignedCard}>
+                          <Text style={styles.pickupOpsAssignedLabel}>Current Assignment</Text>
+                          <Text style={styles.pickupOpsAssignedValue}>
+                            {pickupQueueRecord.assigned_vehicle_code
+                              ? `${pickupQueueRecord.assigned_vehicle_code} • ${pickupQueueRecord.assigned_vehicle_type || 'Vehicle assigned'}`
+                              : 'No pickup agent assigned yet'}
+                          </Text>
+                          <Text style={styles.pickupOpsAssignedMeta}>
+                            {pickupQueueRecord.pickup_state || 'Unknown state'} • {pickupQueueRecord.source_terminal_code || 'No hub'} • SLA {pickupQueueRecord.assignment_sla_at ? formatDate(pickupQueueRecord.assignment_sla_at) : 'not set'}
+                          </Text>
+                        </View>
+
+                        <TextInput
+                          style={styles.overrideInput}
+                          placeholder="Assignment note, issue reason, or transfer context..."
+                          placeholderTextColor="#9ca3af"
+                          value={pickupOpsReason}
+                          onChangeText={setPickupOpsReason}
+                          multiline
+                        />
+
+                        {pickupQueueRecord.assigned_agent_id ? (
+                          <View style={styles.pickupOpsActionRow}>
+                            <Pressable
+                              style={styles.pickupOpsReleaseBtn}
+                              onPress={() => handleUnassignPickupAgent(selectedShipment)}
+                              disabled={pickupOpsBusy === 'unassign'}
+                            >
+                              <Text style={styles.pickupOpsReleaseText}>{pickupOpsBusy === 'unassign' ? 'Releasing...' : 'Unassign To Queue'}</Text>
+                            </Pressable>
+                          </View>
+                        ) : null}
+
+                        <Text style={styles.pickupOpsListTitle}>Recommended Pickup Agents</Text>
+                        {pickupCandidates.length === 0 ? (
+                          <Text style={styles.timelineEmpty}>No active pickup candidates matched this request yet.</Text>
+                        ) : (
+                          <View style={styles.pickupCandidateList}>
+                            {pickupCandidates.map((candidate) => {
+                              const isAssigned = pickupQueueRecord.assigned_agent_id === candidate.pickup_agent_id;
+                              const isTransfer = !!pickupQueueRecord.assigned_agent_id && !isAssigned;
+                              const actionKey = `assign:${candidate.pickup_agent_id}`;
+
+                              return (
+                                <View key={candidate.pickup_agent_id} style={styles.pickupCandidateCard}>
+                                  <View style={{ flex: 1, gap: 4 }}>
+                                    <Text style={styles.pickupCandidateTitle}>
+                                      {candidate.driver_name || candidate.vehicle_code || 'Pickup agent'}
+                                    </Text>
+                                    <Text style={styles.pickupCandidateMeta}>
+                                      {candidate.vehicle_code || 'No vehicle code'} • {candidate.vehicle_type || 'Vehicle type N/A'} • Score {candidate.score ?? 'N/A'}
+                                    </Text>
+                                    <Text style={styles.pickupCandidateMeta}>
+                                      {candidate.home_state || 'Unknown state'} • {candidate.home_terminal_code || 'No terminal'} • {candidate.availability_status || 'unknown'}
+                                    </Text>
+                                    {candidate.driver_phone ? (
+                                      <Text style={styles.pickupCandidateMeta}>Phone: {candidate.driver_phone}</Text>
+                                    ) : null}
+                                  </View>
+                                  <Pressable
+                                    style={[
+                                      styles.pickupCandidateAction,
+                                      isAssigned && styles.pickupCandidateActionAssigned,
+                                    ]}
+                                    onPress={() => handleAssignPickupAgent(selectedShipment, candidate)}
+                                    disabled={isAssigned || pickupOpsBusy === actionKey}
+                                  >
+                                    <Text style={[styles.pickupCandidateActionText, isAssigned && styles.pickupCandidateActionTextAssigned]}>
+                                      {isAssigned ? 'Assigned' : pickupOpsBusy === actionKey ? 'Working...' : isTransfer ? 'Transfer' : 'Assign'}
+                                    </Text>
+                                  </Pressable>
+                                </View>
+                              );
+                            })}
+                          </View>
+                        )}
+
+                        <Text style={styles.pickupOpsListTitle}>Assignment History</Text>
+                        {pickupAttempts.length === 0 ? (
+                          <Text style={styles.timelineEmpty}>No assignment attempts have been logged for this request yet.</Text>
+                        ) : (
+                          <View style={styles.pickupAttemptList}>
+                            {pickupAttempts.map((attempt) => (
+                              <View key={attempt.id} style={styles.pickupAttemptCard}>
+                                <Text style={styles.pickupAttemptTitle}>
+                                  Attempt {attempt.attempt_order} • {attempt.agent?.driver_name || attempt.agent?.vehicle_code || 'Pickup agent'}
+                                </Text>
+                                <Text style={styles.pickupAttemptMeta}>
+                                  {attempt.attempt_status} • {attempt.agent?.vehicle_code || 'No vehicle code'} • {attempt.offered_at ? formatDate(attempt.offered_at) : formatDate(attempt.created_at)}
+                                </Text>
+                                {attempt.offer_reason ? <Text style={styles.pickupAttemptNotes}>{attempt.offer_reason}</Text> : null}
+                                {attempt.response_notes ? <Text style={styles.pickupAttemptNotes}>{attempt.response_notes}</Text> : null}
+                              </View>
+                            ))}
+                          </View>
+                        )}
+                      </>
+                    ) : (
+                      <Text style={styles.timelineEmpty}>This managed pickup shipment does not have a queue record yet.</Text>
+                    )}
+                  </View>
+                )}
 
                 <View style={styles.modalActions}>
                   {/* Override reason input */}
@@ -750,6 +1049,35 @@ const styles = StyleSheet.create({
   detailCard: { width: '48%', backgroundColor: '#F9FAFB', borderRadius: 14, padding: 16, borderWidth: 1, borderColor: '#F3F4F6' },
   detailLabel: { fontSize: 11, color: '#6b7280', fontWeight: '700', textTransform: 'uppercase', marginBottom: 6 },
   detailValue: { fontSize: 14, color: '#111827', fontWeight: '600', lineHeight: 20 },
+  pickupOpsSection: { backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 16, padding: 18, marginBottom: 20, gap: 14 },
+  pickupOpsHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
+  pickupOpsTitle: { fontSize: 18, fontWeight: '800', color: '#111827' },
+  pickupOpsSub: { fontSize: 13, color: '#475569', marginTop: 4, maxWidth: 620 },
+  pickupOpsSummaryRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  pickupOpsStat: { minWidth: 120, backgroundColor: '#fff', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10 },
+  pickupOpsStatLabel: { fontSize: 11, color: '#64748B', fontWeight: '700', textTransform: 'uppercase', marginBottom: 4 },
+  pickupOpsStatValue: { fontSize: 13, color: '#0F172A', fontWeight: '700' },
+  pickupOpsAssignedCard: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#DCFCE7', borderRadius: 12, padding: 14, gap: 4 },
+  pickupOpsAssignedLabel: { fontSize: 11, color: '#047857', fontWeight: '700', textTransform: 'uppercase' },
+  pickupOpsAssignedValue: { fontSize: 15, color: '#111827', fontWeight: '700' },
+  pickupOpsAssignedMeta: { fontSize: 12, color: '#64748B' },
+  pickupOpsActionRow: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
+  pickupOpsReleaseBtn: { alignSelf: 'flex-start', backgroundColor: '#FFF1F2', borderWidth: 1, borderColor: '#FDA4AF', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10 },
+  pickupOpsReleaseText: { color: '#BE123C', fontWeight: '800', fontSize: 12 },
+  pickupOpsListTitle: { fontSize: 15, fontWeight: '800', color: '#111827' },
+  pickupCandidateList: { gap: 10 },
+  pickupCandidateCard: { flexDirection: 'row', gap: 12, alignItems: 'center', backgroundColor: '#fff', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 14, padding: 14 },
+  pickupCandidateTitle: { fontSize: 14, color: '#111827', fontWeight: '700' },
+  pickupCandidateMeta: { fontSize: 12, color: '#64748B' },
+  pickupCandidateAction: { backgroundColor: BRAND.lime, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10 },
+  pickupCandidateActionAssigned: { backgroundColor: '#DCFCE7' },
+  pickupCandidateActionText: { color: '#1a1a1a', fontWeight: '800', fontSize: 12 },
+  pickupCandidateActionTextAssigned: { color: '#166534' },
+  pickupAttemptList: { gap: 10 },
+  pickupAttemptCard: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 12, padding: 12, gap: 4 },
+  pickupAttemptTitle: { fontSize: 13, color: '#111827', fontWeight: '700' },
+  pickupAttemptMeta: { fontSize: 12, color: '#64748B' },
+  pickupAttemptNotes: { fontSize: 12, color: '#334155', lineHeight: 18 },
   modalActions: { flexDirection: 'row', gap: 12, marginBottom: 24, flexWrap: 'wrap' },
   modalActionPrimary: { backgroundColor: BRAND.lime, paddingHorizontal: 18, paddingVertical: 14, borderRadius: 12 },
   modalActionPrimaryText: { color: '#1a1a1a', fontWeight: '800', fontSize: 13 },
