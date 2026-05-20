@@ -8,7 +8,11 @@ import Animated, { FadeInDown, FadeIn } from 'react-native-reanimated';
 import { BRAND } from '../../constants/Theme';
 import { supabase } from '../../supabase';
 
-export default function AdminAuthScreen({ onAuthenticated }) {
+type AdminAuthScreenProps = {
+  onAuthenticated?: () => void;
+};
+
+export default function AdminAuthScreen({ onAuthenticated }: AdminAuthScreenProps) {
   const { width } = useWindowDimensions();
   const isMobile = width < 768;
 
@@ -47,8 +51,9 @@ export default function AdminAuthScreen({ onAuthenticated }) {
 
       if (error) throw error;
       onAuthenticated?.();
-    } catch (error) {
-      setMessage(error?.message || 'Could not sign in to admin.');
+    } catch (error: unknown) {
+      const nextMessage = error instanceof Error ? error.message : 'Could not sign in to admin.';
+      setMessage(nextMessage);
     } finally {
       setLoading(false);
     }

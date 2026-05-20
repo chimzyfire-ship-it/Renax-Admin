@@ -54,7 +54,9 @@ export default function AnalyticsReports() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'rider_locations' }, () => loadData())
       .subscribe();
 
-    return () => channel.unsubscribe();
+    return () => {
+      void channel.unsubscribe();
+    };
   }, [loadData, rangeKey]);
 
   const metrics = data?.metrics || {};

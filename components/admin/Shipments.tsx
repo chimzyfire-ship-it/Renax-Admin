@@ -49,6 +49,18 @@ const formatDate = (dateStr: string) =>
     minute: '2-digit',
   });
 
+const getShipmentStageLabel = (shipment: any) => {
+  if (
+    shipment?.routing_mode === 'relay_terminal'
+    && shipment?.relay_last_mile_strategy === 'recipient_pickup'
+    && shipment?.dispatch_stage === 'received_at_destination_terminal'
+  ) {
+    return 'Awaiting Recipient Pickup';
+  }
+
+  return stageLabel(shipment?.dispatch_stage || 'pending_routing');
+};
+
 const getAdvanceLabel = (shipment: any) => {
   const stage = shipment.dispatch_stage || 'pending_routing';
   const routing = shipment.routing_mode || 'last_mile_local';
@@ -69,7 +81,9 @@ const getAdvanceLabel = (shipment: any) => {
     awaiting_source_terminal: 'Check In Source Hub',
     received_at_source_terminal: 'Dispatch Linehaul',
     linehaul_in_transit: 'Receive At Destination Hub',
-    received_at_destination_terminal: 'Release Final Mile',
+    received_at_destination_terminal: shipment?.relay_last_mile_strategy === 'recipient_pickup'
+      ? 'Confirm Recipient Pickup'
+      : 'Release Final Mile',
     awaiting_final_mile_rider: 'Mark Out For Delivery',
     out_for_delivery: 'Mark Delivered',
   };
@@ -109,21 +123,44 @@ export default function Shipments() {
   const [pickupOpsLoading, setPickupOpsLoading] = useState(false);
   const [pickupOpsBusy, setPickupOpsBusy] = useState<string | null>(null);
   const [pickupOpsReason, setPickupOpsReason] = useState('');
+  const [dispatchWatchlist, setDispatchWatchlist] = useState<any[]>([]);
+  const [dispatchOpsBusy, setDispatchOpsBusy] = useState<string | null>(null);
 
   const terminalMap = useMemo(
     () => Object.fromEntries(terminals.map((terminal) => [terminal.id, terminal])),
     [terminals]
   );
 
+  const dispatchStats = useMemo(() => ({
+    liveOffers: dispatchWatchlist.filter((item) => Number(item.live_offer_count || 0) > 0).length,
+    pendingOps: dispatchWatchlist.filter((item) => item.escalation_status === 'pending_ops').length,
+    awaitingAssignment: dispatchWatchlist.filter((item) => !item.assigned_agent_id && Number(item.live_offer_count || 0) === 0 && item.orchestration_status !== 'assigned').length,
+    assigned: dispatchWatchlist.filter((item) => !!item.assigned_agent_id).length,
+  }), [dispatchWatchlist]);
+
   const loadShipments = useCallback(async () => {
     setLoading(true);
     try {
-      const [{ data: shipmentData }, { data: terminalData }] = await Promise.all([
+      const [{ data: shipmentData }, { data: terminalData }, { data: watchlistData }] = await Promise.all([
         supabase.from('shipments').select('*').order('created_at', { ascending: false }),
         supabase.from('terminals').select('*').order('state'),
+        supabase.from('first_mile_dispatch_watchlist').select('*'),
       ]);
       setShipments(shipmentData || []);
       setTerminals(terminalData || []);
+      setDispatchWatchlist((watchlistData || []).sort((left: any, right: any) => {
+        const leftPending = left.escalation_status === 'pending_ops' ? 0 : 1;
+        const rightPending = right.escalation_status === 'pending_ops' ? 0 : 1;
+        if (leftPending !== rightPending) return leftPending - rightPending;
+
+        const leftOffer = Number(left.live_offer_count || 0) > 0 ? 0 : 1;
+        const rightOffer = Number(right.live_offer_count || 0) > 0 ? 0 : 1;
+        if (leftOffer !== rightOffer) return leftOffer - rightOffer;
+
+        const leftSla = left.assignment_sla_at ? new Date(left.assignment_sla_at).getTime() : Number.MAX_SAFE_INTEGER;
+        const rightSla = right.assignment_sla_at ? new Date(right.assignment_sla_at).getTime() : Number.MAX_SAFE_INTEGER;
+        return leftSla - rightSla;
+      }));
     } finally {
       setLoading(false);
     }
@@ -344,7 +381,9 @@ export default function Shipments() {
                       : shipment.dispatch_stage === 'linehaul_in_transit'
                         ? 'received_at_destination_terminal'
                         : shipment.dispatch_stage === 'received_at_destination_terminal'
-                          ? 'awaiting_final_mile_rider'
+                          ? shipment.relay_last_mile_strategy === 'recipient_pickup'
+                            ? 'delivered'
+                            : 'awaiting_final_mile_rider'
                           : shipment.dispatch_stage === 'awaiting_final_mile_rider'
                             ? 'out_for_delivery'
                             : 'delivered',
@@ -374,6 +413,7 @@ export default function Shipments() {
     try {
       const routing = await resolveRouting(shipment.pickup_address || '', shipment.delivery_address || '', {
         relayFirstMileStrategy: shipment.relay_first_mile_strategy || 'customer_dropoff',
+        relayLastMileStrategy: shipment.relay_last_mile_strategy || 'renax_delivery',
       });
       const shipmentType = routing.routing_mode === 'relay_terminal' ? 'inter_state' : 'intra_state';
 
@@ -441,6 +481,53 @@ export default function Shipments() {
 
     if (refreshedShipment) {
       await loadShipmentDetails(refreshedShipment);
+    }
+  };
+
+  const openShipmentFromWatchlist = async (watchlistItem: any) => {
+    const existing = shipments.find((shipment) => shipment.id === watchlistItem.shipment_id);
+    if (existing) {
+      await loadShipmentDetails(existing);
+      return;
+    }
+
+    const { data: shipment } = await supabase
+      .from('shipments')
+      .select('*')
+      .eq('id', watchlistItem.shipment_id)
+      .maybeSingle();
+
+    if (shipment) {
+      await loadShipmentDetails(shipment);
+    }
+  };
+
+  const handleDispatchHeartbeat = async () => {
+    setDispatchOpsBusy('heartbeat');
+    try {
+      const { error } = await supabase.rpc('process_first_mile_dispatch_backlog', { p_limit: 100 });
+      if (error) throw error;
+      await loadShipments();
+    } finally {
+      setDispatchOpsBusy(null);
+    }
+  };
+
+  const handleReofferWatchlistItem = async (watchlistItem: any) => {
+    setDispatchOpsBusy(`reoffer:${watchlistItem.pickup_request_id}`);
+    try {
+      const { error } = await supabase.rpc('offer_next_first_mile_pickup_candidate', {
+        p_pickup_request_id: watchlistItem.pickup_request_id,
+        p_force: false,
+        p_reason: 'Ops manually restarted the dispatch ladder from the watchlist.',
+      });
+      if (error) throw error;
+      await loadShipments();
+      if (selectedShipment?.id === watchlistItem.shipment_id) {
+        await openShipmentFromWatchlist(watchlistItem);
+      }
+    } finally {
+      setDispatchOpsBusy(null);
     }
   };
 
@@ -521,6 +608,96 @@ export default function Shipments() {
         </Pressable>
       </View>
 
+      <View style={styles.dispatchBoard}>
+        <View style={styles.dispatchBoardHeader}>
+          <View>
+            <Text style={styles.dispatchBoardTitle}>First-Mile Dispatch Watchlist</Text>
+            <Text style={styles.dispatchBoardSub}>Supervise the private pickup ladder, restart offers when needed, and spot escalations before SLA drift spreads.</Text>
+          </View>
+          <Pressable style={styles.dispatchHeartbeatBtn} onPress={handleDispatchHeartbeat} disabled={dispatchOpsBusy === 'heartbeat'}>
+            <RefreshCw color="#002B22" size={15} />
+            <Text style={styles.dispatchHeartbeatText}>{dispatchOpsBusy === 'heartbeat' ? 'Running...' : 'Run Heartbeat'}</Text>
+          </Pressable>
+        </View>
+
+        <View style={styles.dispatchStatsRow}>
+          {[
+            ['Live Offers', dispatchStats.liveOffers],
+            ['Pending Ops', dispatchStats.pendingOps],
+            ['Awaiting Candidate', dispatchStats.awaitingAssignment],
+            ['Assigned', dispatchStats.assigned],
+          ].map(([label, value]) => (
+            <View key={String(label)} style={styles.dispatchStatCard}>
+              <Text style={styles.dispatchStatLabel}>{String(label)}</Text>
+              <Text style={styles.dispatchStatValue}>{String(value)}</Text>
+            </View>
+          ))}
+        </View>
+
+        {dispatchWatchlist.length === 0 ? (
+          <Text style={styles.dispatchEmptyText}>No first-mile dispatch requests are active right now.</Text>
+        ) : (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            <View style={styles.dispatchCardRow}>
+              {dispatchWatchlist.slice(0, 10).map((item) => {
+                const canReoffer = !item.assigned_agent_id && Number(item.live_offer_count || 0) === 0;
+                const isEscalated = item.escalation_status === 'pending_ops';
+                const actionKey = `reoffer:${item.pickup_request_id}`;
+
+                return (
+                  <View key={item.pickup_request_id} style={[styles.dispatchCard, isEscalated && styles.dispatchCardEscalated]}>
+                    <View style={styles.dispatchCardTop}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.dispatchCardTracking}>{item.tracking_id || item.shipment_id}</Text>
+                        <Text style={styles.dispatchCardRoute}>{item.pickup_state || 'Unknown'} {'->'} {item.pickup_city || 'Unknown pickup city'}</Text>
+                      </View>
+                      <View style={[styles.dispatchStatusPill, isEscalated ? styles.dispatchStatusPillAlert : styles.dispatchStatusPillNeutral]}>
+                        <Text style={styles.dispatchStatusPillText}>
+                          {String(item.orchestration_status || 'awaiting_assignment').replace(/_/g, ' ')}
+                        </Text>
+                      </View>
+                    </View>
+
+                    <Text style={styles.dispatchCardMeta}>
+                      {item.source_terminal_code || 'No hub'} • attempts {item.auto_offer_attempt_count || 0} • best {item.best_attempt_score || 'N/A'}
+                    </Text>
+                    <Text style={styles.dispatchCardMeta}>
+                      {Number(item.live_offer_count || 0) > 0
+                        ? `Live offer expires ${item.current_offer_expires_at ? formatDate(item.current_offer_expires_at) : 'soon'}`
+                        : `SLA ${item.assignment_sla_at ? formatDate(item.assignment_sla_at) : 'not set'}`}
+                    </Text>
+                    <Text style={styles.dispatchCardMeta}>
+                      {item.assigned_vehicle_code
+                        ? `Assigned ${item.assigned_vehicle_code} (${item.assigned_vehicle_type || 'vehicle'})`
+                        : isEscalated
+                          ? item.escalation_reason || 'Ops attention required.'
+                          : 'No pickup agent assigned yet'}
+                    </Text>
+
+                    <View style={styles.dispatchCardActions}>
+                      <Pressable style={styles.dispatchViewBtn} onPress={() => openShipmentFromWatchlist(item)}>
+                        <Text style={styles.dispatchViewBtnText}>Open Shipment</Text>
+                      </Pressable>
+                      {canReoffer ? (
+                        <Pressable
+                          style={styles.dispatchReofferBtn}
+                          onPress={() => handleReofferWatchlistItem(item)}
+                          disabled={dispatchOpsBusy === actionKey}
+                        >
+                          <Text style={styles.dispatchReofferBtnText}>
+                            {dispatchOpsBusy === actionKey ? 'Re-offering...' : 'Restart Ladder'}
+                          </Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
+          </ScrollView>
+        )}
+      </View>
+
       <View style={styles.actionBar}>
         <View style={styles.searchBox}>
           <Route size={18} color="#6b7280" style={{ marginLeft: 12, marginRight: 8 }} />
@@ -591,7 +768,7 @@ export default function Shipments() {
                     </View>
                     <Text style={[styles.cellText, { flex: 1.0 }]}>{routingMode === 'relay_terminal' ? 'Relay' : routingMode === 'manual_review' ? 'Review' : 'Local'}</Text>
                     <View style={{ flex: 1.2, gap: 6 }}>
-                      <Text style={[styles.cellText, { color }]}>{stageLabel(currentStage)}</Text>
+                      <Text style={[styles.cellText, { color }]}>{getShipmentStageLabel(item)}</Text>
                       <Text style={styles.microText}>{currentStatus}</Text>
                     </View>
                     <Text style={[styles.cellText, { flex: 1.1 }]}>{terminalMap[item.source_terminal_id]?.code || 'N/A'}</Text>
@@ -641,8 +818,10 @@ export default function Shipments() {
                 <View style={styles.detailsGrid}>
                   {[
                     ['Routing', selectedShipment.routing_mode === 'relay_terminal' ? 'Terminal Relay' : selectedShipment.routing_mode === 'manual_review' ? 'Manual Review' : 'Local Delivery'],
-                    ['Stage', stageLabel(selectedShipment.dispatch_stage || 'pending_routing')],
+                    ['Stage', getShipmentStageLabel(selectedShipment)],
                     ['Status', shipmentStatusLabel(selectedShipment.dispatch_stage || 'pending_routing', selectedShipment.routing_mode || 'last_mile_local')],
+                    ['First Mile Plan', selectedShipment.relay_first_mile_strategy === 'renax_pickup' ? 'RENAX pickup to source terminal' : selectedShipment.routing_mode === 'relay_terminal' ? 'Customer drop-off to source terminal' : 'Direct rider dispatch'],
+                    ['Destination Handoff', selectedShipment.relay_last_mile_strategy === 'recipient_pickup' ? 'Recipient pickup at destination terminal' : selectedShipment.routing_mode === 'relay_terminal' ? 'RENAX final-mile delivery from terminal' : 'Direct delivery'],
                     ['Source Hub', terminalMap[selectedShipment.source_terminal_id]?.name || 'N/A'],
                     ['Destination Hub', terminalMap[selectedShipment.destination_terminal_id]?.name || 'N/A'],
                     ['Pickup', selectedShipment.pickup_address || 'N/A'],
@@ -1014,6 +1193,33 @@ const styles = StyleSheet.create({
   subTitle: { fontSize: 15, color: '#4b5563', maxWidth: 760 },
   refreshBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#ECFDF5', paddingHorizontal: 16, paddingVertical: 12, borderRadius: 12 },
   refreshBtnText: { fontSize: 13, fontWeight: '700', color: '#003822' },
+  dispatchBoard: { backgroundColor: '#F8FAFC', borderRadius: 18, borderWidth: 1, borderColor: '#E2E8F0', padding: 18, marginBottom: 20, gap: 14 },
+  dispatchBoardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' },
+  dispatchBoardTitle: { fontSize: 20, fontWeight: '800', color: '#111827', marginBottom: 4 },
+  dispatchBoardSub: { fontSize: 13, color: '#475569', maxWidth: 720, lineHeight: 20 },
+  dispatchHeartbeatBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: BRAND.lime, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10 },
+  dispatchHeartbeatText: { color: '#002B22', fontSize: 12, fontWeight: '800' },
+  dispatchStatsRow: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
+  dispatchStatCard: { minWidth: 140, backgroundColor: '#fff', borderRadius: 12, borderWidth: 1, borderColor: '#E5E7EB', paddingHorizontal: 12, paddingVertical: 10 },
+  dispatchStatLabel: { fontSize: 11, color: '#64748B', fontWeight: '700', textTransform: 'uppercase', marginBottom: 4 },
+  dispatchStatValue: { fontSize: 16, color: '#0F172A', fontWeight: '800' },
+  dispatchEmptyText: { fontSize: 14, color: '#64748B' },
+  dispatchCardRow: { flexDirection: 'row', gap: 12, paddingRight: 12 },
+  dispatchCard: { width: 320, backgroundColor: '#fff', borderRadius: 16, borderWidth: 1, borderColor: '#E5E7EB', padding: 16, gap: 8 },
+  dispatchCardEscalated: { borderColor: '#FCA5A5', backgroundColor: '#FFF7F7' },
+  dispatchCardTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 },
+  dispatchCardTracking: { fontSize: 15, fontWeight: '800', color: '#111827' },
+  dispatchCardRoute: { fontSize: 12, color: '#64748B', marginTop: 4 },
+  dispatchStatusPill: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 7, borderWidth: 1 },
+  dispatchStatusPillNeutral: { backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' },
+  dispatchStatusPillAlert: { backgroundColor: '#FEF2F2', borderColor: '#FECACA' },
+  dispatchStatusPillText: { fontSize: 11, fontWeight: '700', color: '#111827', textTransform: 'capitalize' },
+  dispatchCardMeta: { fontSize: 12, color: '#475569', lineHeight: 18 },
+  dispatchCardActions: { flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginTop: 8 },
+  dispatchViewBtn: { backgroundColor: '#E5E7EB', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10 },
+  dispatchViewBtnText: { color: '#111827', fontSize: 12, fontWeight: '800' },
+  dispatchReofferBtn: { backgroundColor: BRAND.green, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10 },
+  dispatchReofferBtnText: { color: '#fff', fontSize: 12, fontWeight: '800' },
   actionBar: { gap: 12, marginBottom: 20 },
   searchBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 10, height: 44, width: '100%', maxWidth: 420 },
   searchInput: { flex: 1, height: '100%', color: '#1a1a1a', fontSize: 13, outlineStyle: 'none' as any },

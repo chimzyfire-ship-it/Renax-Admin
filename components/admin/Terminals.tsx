@@ -35,6 +35,8 @@ export default function Terminals() {
     const sourceReady = shipments.filter((shipment) => shipment.source_terminal_id === terminal.id && shipment.dispatch_stage === 'received_at_source_terminal');
     const destinationIncoming = shipments.filter((shipment) => shipment.destination_terminal_id === terminal.id && shipment.dispatch_stage === 'received_at_destination_terminal');
     const finalMileQueue = shipments.filter((shipment) => shipment.destination_terminal_id === terminal.id && shipment.dispatch_stage === 'awaiting_final_mile_rider');
+    const recipientPickupQueue = destinationIncoming.filter((shipment) => shipment.relay_last_mile_strategy === 'recipient_pickup');
+    const destinationReleaseQueue = destinationIncoming.filter((shipment) => shipment.relay_last_mile_strategy !== 'recipient_pickup');
     const linehaul = shipments.filter((shipment) => (shipment.source_terminal_id === terminal.id || shipment.destination_terminal_id === terminal.id) && shipment.dispatch_stage === 'linehaul_in_transit');
 
     return {
@@ -42,7 +44,9 @@ export default function Terminals() {
       sourceIncoming,
       sourceReady,
       destinationIncoming,
+      destinationReleaseQueue,
       finalMileQueue,
+      recipientPickupQueue,
       linehaul,
     };
   }), [terminals, shipments]);
@@ -69,6 +73,8 @@ export default function Terminals() {
               ? 'Terminal staff released parcel onto linehaul.'
               : shipment.dispatch_stage === 'linehaul_in_transit'
                 ? 'Terminal staff confirmed arrival at destination hub.'
+                : shipment.dispatch_stage === 'received_at_destination_terminal' && shipment.relay_last_mile_strategy === 'recipient_pickup'
+                  ? 'Terminal staff confirmed recipient pickup from the destination hub.'
                 : 'Terminal team advanced the relay milestone.',
           proofs: [
             {
@@ -81,7 +87,9 @@ export default function Terminals() {
                   : shipment.dispatch_stage === 'linehaul_in_transit'
                     ? 'received_at_destination_terminal'
                     : shipment.dispatch_stage === 'received_at_destination_terminal'
-                      ? 'awaiting_final_mile_rider'
+                      ? shipment.relay_last_mile_strategy === 'recipient_pickup'
+                        ? 'delivered'
+                        : 'awaiting_final_mile_rider'
                       : shipment.dispatch_stage === 'awaiting_final_mile_rider'
                         ? 'out_for_delivery'
                         : 'delivered',
@@ -119,7 +127,7 @@ export default function Terminals() {
         </View>
       ) : (
         <ScrollView contentContainerStyle={styles.grid}>
-          {terminalQueues.map(({ terminal, sourceIncoming, sourceReady, destinationIncoming, finalMileQueue, linehaul }) => (
+          {terminalQueues.map(({ terminal, sourceIncoming, sourceReady, destinationReleaseQueue, finalMileQueue, recipientPickupQueue, linehaul }) => (
             <View key={terminal.id} style={[styles.card, glass]}>
               <View style={styles.cardHead}>
                 <View style={styles.iconWrap}>
@@ -142,7 +150,8 @@ export default function Terminals() {
                   ['Intake', sourceIncoming.length],
                   ['Ready Linehaul', sourceReady.length],
                   ['In Linehaul', linehaul.length],
-                  ['Arrival', destinationIncoming.length],
+                  ['Arrival', destinationReleaseQueue.length],
+                  ['Recipient Pickup', recipientPickupQueue.length],
                   ['Final Mile', finalMileQueue.length],
                 ].map(([label, value]) => (
                   <View key={String(label)} style={styles.statPill}>
@@ -179,23 +188,31 @@ export default function Terminals() {
 
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>Destination Terminal Queue</Text>
-                {[...destinationIncoming, ...finalMileQueue].slice(0, 4).map((shipment) => (
+                {[...destinationReleaseQueue, ...recipientPickupQueue, ...finalMileQueue].slice(0, 4).map((shipment) => (
                   <View key={shipment.id} style={styles.queueRow}>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.queueTracking}>{shipment.tracking_id || shipment.id}</Text>
                       <Text style={styles.queueRoute}>{shipment.pickup_state} → {shipment.delivery_state}</Text>
                       <Text style={[styles.queueStage, { color: stageColor(shipment.dispatch_stage || 'pending_routing') }]}>
-                        {stageLabel(shipment.dispatch_stage || 'pending_routing')}
+                        {shipment.dispatch_stage === 'received_at_destination_terminal' && shipment.relay_last_mile_strategy === 'recipient_pickup'
+                          ? 'Awaiting Recipient Pickup'
+                          : stageLabel(shipment.dispatch_stage || 'pending_routing')}
                       </Text>
                     </View>
                     <Pressable style={styles.queueActionBtn} onPress={() => runAdvance(shipment)} disabled={busyId === shipment.id}>
                       <Text style={styles.queueActionText}>
-                        {busyId === shipment.id ? '...' : shipment.dispatch_stage === 'received_at_destination_terminal' ? 'Release Rider' : 'Open Queue'}
+                        {busyId === shipment.id
+                          ? '...'
+                          : shipment.dispatch_stage === 'received_at_destination_terminal'
+                            ? shipment.relay_last_mile_strategy === 'recipient_pickup'
+                              ? 'Confirm Pickup'
+                              : 'Release Rider'
+                            : 'Open Queue'}
                       </Text>
                     </Pressable>
                   </View>
                 ))}
-                {destinationIncoming.length + finalMileQueue.length === 0 && <Text style={styles.emptyText}>No destination-hub work pending.</Text>}
+                {destinationReleaseQueue.length + recipientPickupQueue.length + finalMileQueue.length === 0 && <Text style={styles.emptyText}>No destination-hub work pending.</Text>}
               </View>
 
               <View style={styles.footerRow}>
