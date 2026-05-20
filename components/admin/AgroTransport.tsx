@@ -91,7 +91,9 @@ export default function AgroTransport() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'shipments' }, () => load())
       .subscribe();
 
-    return () => channel.unsubscribe();
+    return () => {
+      void channel.unsubscribe();
+    };
   }, [load]);
 
   /* ── Derived lists ──────────────────────────────────── */

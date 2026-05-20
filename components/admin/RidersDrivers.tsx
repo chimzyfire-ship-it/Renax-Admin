@@ -13,7 +13,7 @@ import {
 import { BRAND } from '../../constants/Theme';
 import { CheckCircle, Circle, MapPin, Search, Truck, Users, X } from 'lucide-react-native';
 import { supabase } from '../../supabase';
-import { fetchFleetRows, updateFleetVehicleStatus } from '../../utils/adminData';
+import { fetchFleetRows, updateFleetVehicleStatus, updateStaffTerminalAssignment } from '../../utils/adminData';
 import { stageColor, stageLabel } from '../../utils/routingService';
 
 const formatDate = (dateStr: string) => {
@@ -33,12 +33,18 @@ export default function RidersDrivers() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedRider, setSelectedRider] = useState<any | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [terminals, setTerminals] = useState<any[]>([]);
+  const [terminalSearch, setTerminalSearch] = useState('');
 
   const loadRiders = useCallback(async () => {
     setLoading(true);
     try {
-      const rows = await fetchFleetRows();
+      const [rows, terminalRows] = await Promise.all([
+        fetchFleetRows(),
+        supabase.from('terminals').select('id, name, code, city, state, status').eq('status', 'active').order('state'),
+      ]);
       setRiders(rows);
+      setTerminals(terminalRows.data || []);
     } finally {
       setLoading(false);
     }
@@ -53,8 +59,14 @@ export default function RidersDrivers() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'shipments' }, () => loadRiders())
       .subscribe();
 
-    return () => channel.unsubscribe();
+    return () => {
+      void channel.unsubscribe();
+    };
   }, [loadRiders]);
+
+  useEffect(() => {
+    setTerminalSearch('');
+  }, [selectedRider?.riderId]);
 
   const stats = useMemo(() => ({
     total: riders.length,
@@ -75,6 +87,17 @@ export default function RidersDrivers() {
     );
   }, [riders, searchQuery]);
 
+  const filteredTerminals = useMemo(() => {
+    const query = terminalSearch.trim().toLowerCase();
+    if (!query) return terminals;
+    return terminals.filter((terminal) =>
+      terminal.name?.toLowerCase().includes(query)
+      || terminal.code?.toLowerCase().includes(query)
+      || terminal.city?.toLowerCase().includes(query)
+      || terminal.state?.toLowerCase().includes(query)
+    );
+  }, [terminalSearch, terminals]);
+
   const handleSuspendToggle = async (rider: any) => {
     const nextStatus = rider.status === 'Offline' ? 'available' : 'offline';
     setBusyId(rider.riderId);
@@ -90,12 +113,24 @@ export default function RidersDrivers() {
     }
   };
 
+  const handleAssignTerminal = async (rider: any, terminalId: string) => {
+    setBusyId(`terminal:${rider.riderId}`);
+    try {
+      await updateStaffTerminalAssignment(rider.riderId, terminalId);
+      await loadRiders();
+      const next = (await fetchFleetRows()).find((row: any) => row.riderId === rider.riderId);
+      if (next) setSelectedRider(next);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   return (
     <View style={styles.container}>
       <View style={styles.headerRow}>
         <View>
           <Text style={styles.pageTitle}>Riders & Drivers</Text>
-          <Text style={styles.pageSub}>Live roster of riders, their current availability, locations, and active assignments.</Text>
+          <Text style={styles.pageSub}>Live roster of riders, their current availability, locations, active assignments, and ops-owned terminal hub assignment.</Text>
         </View>
         <Pressable style={styles.refreshBtn} onPress={loadRiders}>
           <Text style={styles.refreshBtnText}>Refresh Riders</Text>
@@ -220,7 +255,10 @@ export default function RidersDrivers() {
                     ['Vehicle ID', selectedRider.vehicleId],
                     ['Plate', selectedRider.plateNumber],
                     ['Status', selectedRider.status],
-                    ['Terminal', selectedRider.terminalCode],
+                    ['Assigned Hub', selectedRider.assignedTerminalName || selectedRider.assignedTerminalCode || selectedRider.terminalCode],
+                    ['Preferred Hub', selectedRider.preferredTerminalName || selectedRider.preferredTerminalCode || 'N/A'],
+                    ['Operating Coverage', `${selectedRider.operatingCity || 'Unknown city'}, ${selectedRider.operatingState || 'Unknown state'}`],
+                    ['Account Role', selectedRider.accountRole || 'N/A'],
                     ['Current Location', selectedRider.currentLocation],
                     ['Last Seen', formatDate(selectedRider.lastSeen)],
                     ['Deliveries Today', String(selectedRider.deliveriesToday)],
@@ -244,6 +282,52 @@ export default function RidersDrivers() {
                 ) : (
                   <Text style={styles.emptyText}>This rider has no active assignment right now.</Text>
                 )}
+
+                <Text style={styles.sectionTitle}>Logistics Roles</Text>
+                <View style={styles.rolePillRow}>
+                  {(selectedRider.logisticsRoles?.length ? selectedRider.logisticsRoles : ['unclassified']).map((role: string) => (
+                    <View key={role} style={styles.rolePill}>
+                      <Text style={styles.rolePillText}>{String(role).replace(/_/g, ' ')}</Text>
+                    </View>
+                  ))}
+                </View>
+
+                <Text style={styles.sectionTitle}>Assign Hub</Text>
+                <Text style={styles.sectionSub}>
+                  This is the live hub assignment ops owns. It should not change just because the rider edits operating state or city.
+                </Text>
+                <View style={styles.searchBox}>
+                  <Search size={16} color="#6B7280" />
+                  <TextInput
+                    value={terminalSearch}
+                    onChangeText={setTerminalSearch}
+                    style={styles.searchInput}
+                    placeholder="Search terminal by code, city, or state..."
+                    placeholderTextColor="#9CA3AF"
+                  />
+                </View>
+                <View style={styles.terminalAssignList}>
+                  {filteredTerminals.slice(0, 12).map((terminal) => {
+                    const isAssigned = selectedRider.assignedTerminalId === terminal.id;
+                    return (
+                      <View key={terminal.id} style={styles.terminalAssignCard}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.terminalAssignTitle}>{terminal.name}</Text>
+                          <Text style={styles.terminalAssignMeta}>{terminal.code} • {terminal.city}, {terminal.state}</Text>
+                        </View>
+                        <Pressable
+                          style={[styles.assignBtn, isAssigned && styles.assignBtnActive]}
+                          onPress={() => handleAssignTerminal(selectedRider, terminal.id)}
+                          disabled={isAssigned || busyId === `terminal:${selectedRider.riderId}`}
+                        >
+                          <Text style={[styles.assignBtnText, isAssigned && styles.assignBtnTextActive]}>
+                            {isAssigned ? 'Assigned' : busyId === `terminal:${selectedRider.riderId}` ? 'Saving...' : 'Assign Hub'}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    );
+                  })}
+                </View>
 
                 <View style={styles.modalActions}>
                   <Pressable style={styles.actionBtnGrayLarge} onPress={() => handleSuspendToggle(selectedRider)} disabled={busyId === selectedRider.riderId}>
@@ -473,6 +557,32 @@ const styles = StyleSheet.create({
     color: '#111827',
     marginBottom: 14,
   },
+  sectionSub: {
+    fontSize: 13,
+    color: '#6B7280',
+    marginBottom: 14,
+    lineHeight: 20,
+  },
+  rolePillRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginBottom: 18,
+  },
+  rolePill: {
+    backgroundColor: '#ECFDF5',
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  rolePillText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#065F46',
+    textTransform: 'capitalize',
+  },
   assignmentCard: {
     backgroundColor: '#F9FAFB',
     borderRadius: 14,
@@ -497,6 +607,47 @@ const styles = StyleSheet.create({
   },
   modalActions: {
     marginTop: 18,
+  },
+  terminalAssignList: {
+    gap: 10,
+    marginBottom: 18,
+  },
+  terminalAssignCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: '#F9FAFB',
+    borderWidth: 1,
+    borderColor: '#EEF2F7',
+    borderRadius: 14,
+    padding: 14,
+  },
+  terminalAssignTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#111827',
+    marginBottom: 4,
+  },
+  terminalAssignMeta: {
+    fontSize: 12,
+    color: '#4B5563',
+  },
+  assignBtn: {
+    backgroundColor: BRAND.lime,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  assignBtnActive: {
+    backgroundColor: '#DCFCE7',
+  },
+  assignBtnText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#002B22',
+  },
+  assignBtnTextActive: {
+    color: '#166534',
   },
   actionBtnGrayLarge: {
     alignSelf: 'flex-start',

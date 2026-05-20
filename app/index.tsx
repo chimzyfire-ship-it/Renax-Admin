@@ -71,7 +71,7 @@ export default function AdminScreen() {
   const [session, setSession] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [hasAdminClaim, setHasAdminClaim] = useState(false);
-  const [currentMenu, setCurrentMenu] = useState('dashboard');
+  const [currentMenu, setCurrentMenu] = useState<string>('dashboard');
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session: nextSession } }) => {
@@ -142,7 +142,7 @@ export default function AdminScreen() {
   return (
     <AdminLayout
       currentMenu={currentMenu}
-      onMenuChange={(menu) => setCurrentMenu(menu)}
+      onMenuChange={(menu: string) => setCurrentMenu(menu)}
       onLogout={() => supabase.auth.signOut()}
     >
       {renderContent()}

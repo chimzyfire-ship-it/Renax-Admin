@@ -170,18 +170,24 @@ export async function fetchAdminOverview() {
 export async function fetchFleetRows() {
   const todayIso = startOfTodayIso();
 
-  const [{ data: riderLocations }, { data: shipments }] = await Promise.all([
+  const [{ data: riderLocations }, { data: shipments }, { data: terminals }] = await Promise.all([
     supabase
       .from('rider_locations')
-      .select('rider_id, lat, lng, is_online, last_seen, current_shipment_id, metadata, profiles(id, full_name, phone_number)')
+      .select('rider_id, lat, lng, is_online, last_seen, current_shipment_id, metadata, profiles(id, full_name, phone_number, preferred_terminal_code, assigned_terminal_id, role, state, city, logistics_roles)')
       .order('last_seen', { ascending: false }),
     supabase
       .from('shipments')
       .select('id, tracking_id, assigned_rider_id, final_mile_rider_id, dispatch_stage, status, pickup_state, delivery_state, updated_at, created_at'),
+    supabase
+      .from('terminals')
+      .select('id, name, code, city, state, address, status'),
   ]);
 
   const safeLocations = riderLocations || [];
   const safeShipments = shipments || [];
+  const safeTerminals = terminals || [];
+  const terminalMap = new Map(safeTerminals.map((terminal: any) => [terminal.id, terminal]));
+  const terminalCodeMap = new Map(safeTerminals.map((terminal: any) => [terminal.code, terminal]));
 
   const deliveredTodayByRider = new Map<string, number>();
   safeShipments.forEach((shipment: any) => {
@@ -204,6 +210,12 @@ export async function fetchFleetRows() {
   return safeLocations.map((row: any) => {
     const activeShipment = activeShipmentByRider.get(row.rider_id);
     const maintenance = row.metadata?.status === 'maintenance';
+    const assignedTerminal = row.profiles?.assigned_terminal_id
+      ? terminalMap.get(row.profiles.assigned_terminal_id)
+      : null;
+    const preferredTerminal = row.profiles?.preferred_terminal_code
+      ? terminalCodeMap.get(row.profiles.preferred_terminal_code)
+      : null;
     const status = maintenance
       ? 'Maintenance'
       : activeShipment
@@ -223,7 +235,17 @@ export async function fetchFleetRows() {
       isOnline: row.is_online,
       currentLocation: formatLocation(row),
       lastSeen: row.last_seen,
-      terminalCode: row.metadata?.terminal_code || row.metadata?.state || 'N/A',
+      terminalCode: assignedTerminal?.code || preferredTerminal?.code || row.metadata?.terminal_code || row.metadata?.state || 'N/A',
+      assignedTerminalId: assignedTerminal?.id || row.profiles?.assigned_terminal_id || null,
+      assignedTerminalCode: assignedTerminal?.code || null,
+      assignedTerminalName: assignedTerminal?.name || null,
+      assignedTerminalAddress: assignedTerminal?.address || null,
+      preferredTerminalCode: row.profiles?.preferred_terminal_code || preferredTerminal?.code || null,
+      preferredTerminalName: preferredTerminal?.name || null,
+      operatingState: row.profiles?.state || row.metadata?.state || null,
+      operatingCity: row.profiles?.city || row.metadata?.city || null,
+      logisticsRoles: row.profiles?.logistics_roles || [],
+      accountRole: row.profiles?.role || null,
       mileage: row.metadata?.mileage || 'N/A',
       lastService: row.metadata?.last_service || 'N/A',
       deliveriesToday: deliveredTodayByRider.get(row.rider_id) || 0,
@@ -238,6 +260,56 @@ export async function fetchFleetRows() {
       metadata: row.metadata || {},
     };
   });
+}
+
+export async function updateStaffTerminalAssignment(riderId: string, terminalId: string) {
+  const { data: terminal, error: terminalError } = await supabase
+    .from('terminals')
+    .select('id, code, name, city, state')
+    .eq('id', terminalId)
+    .single();
+
+  if (terminalError || !terminal) {
+    throw terminalError || new Error('Terminal not found');
+  }
+
+  const { error: profileError } = await supabase
+    .from('profiles')
+    .update({
+      assigned_terminal_id: terminal.id,
+      preferred_terminal_code: terminal.code,
+    })
+    .eq('id', riderId);
+
+  if (profileError) throw profileError;
+
+  const { data: existingLocation } = await supabase
+    .from('rider_locations')
+    .select('metadata')
+    .eq('rider_id', riderId)
+    .maybeSingle();
+
+  if (!existingLocation) return;
+
+  const nextMetadata = {
+    ...(existingLocation.metadata || {}),
+    terminal_code: terminal.code,
+    assigned_terminal_id: terminal.id,
+    assigned_terminal_name: terminal.name,
+    assigned_terminal_city: terminal.city,
+    assigned_terminal_state: terminal.state,
+    updated_by_admin_at: new Date().toISOString(),
+  };
+
+  const { error: locationError } = await supabase
+    .from('rider_locations')
+    .update({
+      metadata: nextMetadata,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('rider_id', riderId);
+
+  if (locationError) throw locationError;
 }
 
 export async function updateFleetVehicleStatus(riderId: string, nextStatus: string) {

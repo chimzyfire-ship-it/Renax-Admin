@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Animated,
   Pressable,
@@ -90,9 +90,11 @@ export default function NotificationDrawer({
 }: Props) {
   const slideAnim = useRef(new Animated.Value(420)).current;
   const fadeAnim = useRef(new Animated.Value(0)).current;
+  const [shouldRender, setShouldRender] = useState(visible);
 
   useEffect(() => {
     if (visible) {
+      setShouldRender(true);
       Animated.parallel([
         Animated.timing(slideAnim, { toValue: 0, duration: 280, useNativeDriver: true }),
         Animated.timing(fadeAnim, { toValue: 1, duration: 200, useNativeDriver: true }),
@@ -101,9 +103,13 @@ export default function NotificationDrawer({
       Animated.parallel([
         Animated.timing(slideAnim, { toValue: 420, duration: 220, useNativeDriver: true }),
         Animated.timing(fadeAnim, { toValue: 0, duration: 180, useNativeDriver: true }),
-      ]).start();
+      ]).start(({ finished }) => {
+        if (finished) {
+          setShouldRender(false);
+        }
+      });
     }
-  }, [visible]);
+  }, [fadeAnim, slideAnim, visible]);
 
   const unread = notifications.filter((n) => !n.is_read).length;
 
@@ -119,7 +125,7 @@ export default function NotificationDrawer({
     [onMarkRead, onNavigate, onClose]
   );
 
-  if (!visible && slideAnim._value === 420) return null;
+  if (!shouldRender && !visible) return null;
 
   return (
     <View style={styles.root} pointerEvents={visible ? 'auto' : 'none'}>

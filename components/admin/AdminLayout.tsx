@@ -36,6 +36,13 @@ import { BRAND } from '../../constants/Theme';
 import { supabase } from '../../supabase';
 import NotificationDrawer, { AdminNotification } from './NotificationDrawer';
 
+type AdminLayoutProps = {
+  children: React.ReactNode;
+  currentMenu?: string;
+  onMenuChange?: (menu: string) => void;
+  onLogout?: () => void;
+};
+
 /* ─── Nav Config ──────────────────────────────────────────── */
 const SIDEBAR_MENUS = [
   { key: 'dashboard',       label: 'Dashboard',          icon: LayoutDashboard },
@@ -161,7 +168,7 @@ function useProfileWatcher() {
 }
 
 /* ─── Main Component ──────────────────────────────────────── */
-export default function AdminLayout({ children, currentMenu = 'dashboard', onMenuChange, onLogout }) {
+export default function AdminLayout({ children, currentMenu = 'dashboard', onMenuChange, onLogout }: AdminLayoutProps) {
   const { width } = useWindowDimensions();
   const isMobile = width < 1024;
 
@@ -335,7 +342,7 @@ export default function AdminLayout({ children, currentMenu = 'dashboard', onMen
             resizeMode="cover"
           />
         </View>
-        <View style={StyleSheet.absoluteFillObject} backgroundColor="rgba(244, 247, 245, 0.4)" />
+        <View style={[StyleSheet.absoluteFillObject, { backgroundColor: 'rgba(244, 247, 245, 0.4)' }]} />
 
         {/* Top Navigation Bar */}
         <View style={[styles.topNav, isMobile && styles.topNavMobile]}>
