@@ -74,6 +74,14 @@ const getAdvanceLabel = (shipment: any) => {
     return 'Manage Pickup';
   }
 
+  if (
+    shipment?.routing_mode === 'relay_terminal'
+    && shipment?.relay_last_mile_strategy === 'renax_delivery'
+    && ['received_at_destination_terminal', 'awaiting_final_mile_rider'].includes(stage)
+  ) {
+    return 'Manage Final Mile';
+  }
+
   const labels: Record<string, string> = {
     pending_routing: 'Release To Queue',
     awaiting_rider_acceptance: routing === 'relay_terminal' ? 'Assign First Mile' : 'Release Delivery',
@@ -125,6 +133,12 @@ export default function Shipments() {
   const [pickupOpsReason, setPickupOpsReason] = useState('');
   const [dispatchWatchlist, setDispatchWatchlist] = useState<any[]>([]);
   const [dispatchOpsBusy, setDispatchOpsBusy] = useState<string | null>(null);
+  const [finalMileWatchlist, setFinalMileWatchlist] = useState<any[]>([]);
+  const [finalMileQueueRecord, setFinalMileQueueRecord] = useState<any | null>(null);
+  const [finalMileCandidates, setFinalMileCandidates] = useState<any[]>([]);
+  const [finalMileOpsLoading, setFinalMileOpsLoading] = useState(false);
+  const [finalMileOpsBusy, setFinalMileOpsBusy] = useState<string | null>(null);
+  const [finalMileOpsReason, setFinalMileOpsReason] = useState('');
 
   const terminalMap = useMemo(
     () => Object.fromEntries(terminals.map((terminal) => [terminal.id, terminal])),
@@ -138,13 +152,21 @@ export default function Shipments() {
     assigned: dispatchWatchlist.filter((item) => !!item.assigned_agent_id).length,
   }), [dispatchWatchlist]);
 
+  const finalMileDispatchStats = useMemo(() => ({
+    awaitingRelease: finalMileWatchlist.filter((item) => item.release_required).length,
+    openQueue: finalMileWatchlist.filter((item) => item.dispatch_stage === 'awaiting_final_mile_rider' && !item.final_mile_rider_id).length,
+    outForDelivery: finalMileWatchlist.filter((item) => item.dispatch_stage === 'out_for_delivery' && !!item.final_mile_rider_id).length,
+    candidateReady: finalMileWatchlist.filter((item) => Number(item.candidate_count || 0) > 0).length,
+  }), [finalMileWatchlist]);
+
   const loadShipments = useCallback(async () => {
     setLoading(true);
     try {
-      const [{ data: shipmentData }, { data: terminalData }, { data: watchlistData }] = await Promise.all([
+      const [{ data: shipmentData }, { data: terminalData }, { data: watchlistData }, { data: finalMileWatchlistData }] = await Promise.all([
         supabase.from('shipments').select('*').order('created_at', { ascending: false }),
         supabase.from('terminals').select('*').order('state'),
         supabase.from('first_mile_dispatch_watchlist').select('*'),
+        supabase.from('final_mile_dispatch_watchlist').select('*'),
       ]);
       setShipments(shipmentData || []);
       setTerminals(terminalData || []);
@@ -160,6 +182,17 @@ export default function Shipments() {
         const leftSla = left.assignment_sla_at ? new Date(left.assignment_sla_at).getTime() : Number.MAX_SAFE_INTEGER;
         const rightSla = right.assignment_sla_at ? new Date(right.assignment_sla_at).getTime() : Number.MAX_SAFE_INTEGER;
         return leftSla - rightSla;
+      }));
+      setFinalMileWatchlist((finalMileWatchlistData || []).sort((left: any, right: any) => {
+        const leftRelease = left.release_required ? 0 : 1;
+        const rightRelease = right.release_required ? 0 : 1;
+        if (leftRelease !== rightRelease) return leftRelease - rightRelease;
+
+        const leftQueued = left.dispatch_stage === 'awaiting_final_mile_rider' && !left.final_mile_rider_id ? 0 : 1;
+        const rightQueued = right.dispatch_stage === 'awaiting_final_mile_rider' && !right.final_mile_rider_id ? 0 : 1;
+        if (leftQueued !== rightQueued) return leftQueued - rightQueued;
+
+        return new Date(right.updated_at || right.created_at || 0).getTime() - new Date(left.updated_at || left.created_at || 0).getTime();
       }));
     } finally {
       setLoading(false);
@@ -185,6 +218,9 @@ export default function Shipments() {
 
   const isManagedFirstMileShipment = (shipment: any) =>
     shipment?.routing_mode === 'relay_terminal' && shipment?.relay_first_mile_strategy === 'renax_pickup';
+
+  const isManagedFinalMileShipment = (shipment: any) =>
+    shipment?.routing_mode === 'relay_terminal' && shipment?.relay_last_mile_strategy === 'renax_delivery';
 
   const loadPickupOpsContext = useCallback(async (shipment: any) => {
     if (!isManagedFirstMileShipment(shipment)) {
@@ -254,6 +290,31 @@ export default function Shipments() {
     }
   }, []);
 
+  const loadFinalMileOpsContext = useCallback(async (shipment: any) => {
+    if (!isManagedFinalMileShipment(shipment)) {
+      setFinalMileQueueRecord(null);
+      setFinalMileCandidates([]);
+      return;
+    }
+
+    setFinalMileOpsLoading(true);
+    try {
+      const [{ data: queueRecord }, { data: candidateRows }] = await Promise.all([
+        supabase
+          .from('final_mile_dispatch_watchlist')
+          .select('*')
+          .eq('shipment_id', shipment.id)
+          .maybeSingle(),
+        supabase.rpc('final_mile_dispatch_candidates', { p_shipment_id: shipment.id }),
+      ]);
+
+      setFinalMileQueueRecord(queueRecord || null);
+      setFinalMileCandidates(candidateRows || []);
+    } finally {
+      setFinalMileOpsLoading(false);
+    }
+  }, []);
+
   const loadShipmentDetails = async (shipment: any) => {
     setSelectedShipment(shipment);
     const [{ data: eventData }, { data: suggestionData }, { data: proofData }] = await Promise.all([
@@ -276,10 +337,14 @@ export default function Shipments() {
     setProofRecords(resolvedProofs);
     setOverrideReason('');
     setPickupOpsReason('');
+    setFinalMileOpsReason('');
     setShowOverrideInput(false);
     setShowExceptionMenu(false);
     setShowHubScan(false);
-    await loadPickupOpsContext(shipment);
+    await Promise.all([
+      loadPickupOpsContext(shipment),
+      loadFinalMileOpsContext(shipment),
+    ]);
   };
 
   const handleApplySuggestion = async (shipment: any, suggestion: any) => {
@@ -342,6 +407,11 @@ export default function Shipments() {
 
   const handleAdvance = async (shipment: any, reason?: string) => {
     if (isManagedFirstMileShipment(shipment) && shipment.dispatch_stage === 'awaiting_source_terminal' && !shipment.first_mile_pickup_agent_id) {
+      await loadShipmentDetails(shipment);
+      return;
+    }
+
+    if (isManagedFinalMileShipment(shipment) && ['received_at_destination_terminal', 'awaiting_final_mile_rider'].includes(shipment.dispatch_stage || '')) {
       await loadShipmentDetails(shipment);
       return;
     }
@@ -588,6 +658,70 @@ export default function Shipments() {
     }
   };
 
+  const handleReleaseFinalMileShipment = async (shipment: any) => {
+    const reason = finalMileOpsReason.trim() || 'Destination terminal ops released this parcel into the RENAX final-mile queue.';
+    setFinalMileOpsBusy('release');
+    try {
+      const { error } = await supabase.rpc('release_final_mile_to_marketplace', {
+        p_payload: {
+          shipment_id: shipment.id,
+          reason,
+        },
+      });
+      if (error) throw error;
+
+      setFinalMileOpsReason('');
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setFinalMileOpsBusy(null);
+    }
+  };
+
+  const handleAssignFinalMileRider = async (shipment: any, candidate: any) => {
+    const actionKey = `assign-final-mile:${candidate.rider_id}`;
+    const reason = finalMileOpsReason.trim() || `Ops assigned ${candidate.rider_name || 'a final-mile rider'} to complete destination delivery.`;
+
+    setFinalMileOpsBusy(actionKey);
+    try {
+      const fn = shipment.final_mile_rider_id && shipment.final_mile_rider_id !== candidate.rider_id
+        ? 'transfer_final_mile_rider'
+        : 'assign_final_mile_rider';
+
+      const { error } = await supabase.rpc(fn, {
+        p_payload: {
+          shipment_id: shipment.id,
+          rider_id: candidate.rider_id,
+          reason,
+        },
+      });
+      if (error) throw error;
+
+      setFinalMileOpsReason('');
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setFinalMileOpsBusy(null);
+    }
+  };
+
+  const handleUnassignFinalMileRider = async (shipment: any) => {
+    const reason = finalMileOpsReason.trim() || 'Ops released the assigned final-mile rider and returned the parcel to the destination queue.';
+    setFinalMileOpsBusy('unassign-final-mile');
+    try {
+      const { error } = await supabase.rpc('unassign_final_mile_rider', {
+        p_payload: {
+          shipment_id: shipment.id,
+          reason,
+        },
+      });
+      if (error) throw error;
+
+      setFinalMileOpsReason('');
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setFinalMileOpsBusy(null);
+    }
+  };
+
   const canApplySuggestion = (shipment: any, suggestion: any) => (
     suggestion?.suggestion_status === 'pending' && (
       (shipment.dispatch_stage === 'awaiting_source_terminal' && suggestion.suggested_stage === 'received_at_source_terminal')
@@ -693,6 +827,71 @@ export default function Shipments() {
                   </View>
                 );
               })}
+            </View>
+          </ScrollView>
+        )}
+      </View>
+
+      <View style={styles.dispatchBoard}>
+        <View style={styles.dispatchBoardHeader}>
+          <View>
+            <Text style={styles.dispatchBoardTitle}>Final-Mile Dispatch Watchlist</Text>
+            <Text style={styles.dispatchBoardSub}>Control destination-terminal release, assign live riders with terminal affinity, and keep last-hand-off work visible before it turns messy.</Text>
+          </View>
+        </View>
+
+        <View style={styles.dispatchStatsRow}>
+          {[
+            ['Awaiting Release', finalMileDispatchStats.awaitingRelease],
+            ['Open Queue', finalMileDispatchStats.openQueue],
+            ['Out For Delivery', finalMileDispatchStats.outForDelivery],
+            ['Candidate Ready', finalMileDispatchStats.candidateReady],
+          ].map(([label, value]) => (
+            <View key={String(label)} style={styles.dispatchStatCard}>
+              <Text style={styles.dispatchStatLabel}>{String(label)}</Text>
+              <Text style={styles.dispatchStatValue}>{String(value)}</Text>
+            </View>
+          ))}
+        </View>
+
+        {finalMileWatchlist.length === 0 ? (
+          <Text style={styles.dispatchEmptyText}>No destination-terminal final-mile work is active right now.</Text>
+        ) : (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            <View style={styles.dispatchCardRow}>
+              {finalMileWatchlist.slice(0, 10).map((item) => (
+                <View key={item.shipment_id} style={[styles.dispatchCard, item.release_required && styles.dispatchCardEscalated]}>
+                  <View style={styles.dispatchCardTop}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.dispatchCardTracking}>{item.tracking_id || item.shipment_id}</Text>
+                      <Text style={styles.dispatchCardRoute}>{item.destination_terminal_code || 'Hub'} {'->'} {item.delivery_city || item.delivery_state || 'Recipient area'}</Text>
+                    </View>
+                    <View style={[styles.dispatchStatusPill, item.release_required ? styles.dispatchStatusPillAlert : styles.dispatchStatusPillNeutral]}>
+                      <Text style={styles.dispatchStatusPillText}>
+                        {item.release_required ? 'Needs Release' : String(item.dispatch_stage || 'awaiting_final_mile_rider').replace(/_/g, ' ')}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <Text style={styles.dispatchCardMeta}>
+                    {item.destination_terminal_name || 'Destination terminal'} • candidates {item.candidate_count || 0} • best {item.best_candidate_score || 'N/A'}
+                  </Text>
+                  <Text style={styles.dispatchCardMeta}>
+                    {item.final_mile_rider_id
+                      ? `Assigned ${item.assigned_rider_name || item.final_mile_rider_id}`
+                      : item.release_required
+                        ? 'Waiting for ops to release it into the final-mile queue.'
+                        : 'No rider assigned yet'}
+                  </Text>
+                  <Text style={styles.dispatchCardMeta}>{item.delivery_address || 'No delivery address captured yet.'}</Text>
+
+                  <View style={styles.dispatchCardActions}>
+                    <Pressable style={styles.dispatchViewBtn} onPress={() => openShipmentFromWatchlist({ shipment_id: item.shipment_id })}>
+                      <Text style={styles.dispatchViewBtnText}>Open Shipment</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ))}
             </View>
           </ScrollView>
         )}
@@ -836,6 +1035,134 @@ export default function Shipments() {
                     </View>
                   ))}
                 </View>
+
+                {isManagedFinalMileShipment(selectedShipment) && (
+                  <View style={styles.pickupOpsSection}>
+                    <View style={styles.pickupOpsHeader}>
+                      <View>
+                        <Text style={styles.pickupOpsTitle}>Final-Mile Delivery Control</Text>
+                        <Text style={styles.pickupOpsSub}>Release parcels from the destination terminal, assign the best live rider, and recover assignments cleanly when the handoff changes.</Text>
+                      </View>
+                      {finalMileOpsLoading ? <ActivityIndicator color={BRAND.green} size="small" /> : null}
+                    </View>
+
+                    <View style={styles.pickupOpsSummaryRow}>
+                      <View style={styles.pickupOpsStat}>
+                        <Text style={styles.pickupOpsStatLabel}>Queue Stage</Text>
+                        <Text style={styles.pickupOpsStatValue}>
+                          {finalMileQueueRecord?.dispatch_stage
+                            ? String(finalMileQueueRecord.dispatch_stage).replace(/_/g, ' ')
+                            : String(selectedShipment.dispatch_stage || 'received_at_destination_terminal').replace(/_/g, ' ')}
+                        </Text>
+                      </View>
+                      <View style={styles.pickupOpsStat}>
+                        <Text style={styles.pickupOpsStatLabel}>Destination Hub</Text>
+                        <Text style={styles.pickupOpsStatValue}>{finalMileQueueRecord?.destination_terminal_code || terminalMap[selectedShipment.destination_terminal_id]?.code || 'N/A'}</Text>
+                      </View>
+                      <View style={styles.pickupOpsStat}>
+                        <Text style={styles.pickupOpsStatLabel}>Candidates</Text>
+                        <Text style={styles.pickupOpsStatValue}>{finalMileQueueRecord?.candidate_count || finalMileCandidates.length || 0}</Text>
+                      </View>
+                      <View style={styles.pickupOpsStat}>
+                        <Text style={styles.pickupOpsStatLabel}>Best Score</Text>
+                        <Text style={styles.pickupOpsStatValue}>{finalMileQueueRecord?.best_candidate_score || (finalMileCandidates[0]?.score ?? 'N/A')}</Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.pickupOpsAssignedCard}>
+                      <Text style={styles.pickupOpsAssignedLabel}>Current Assignment</Text>
+                      <Text style={styles.pickupOpsAssignedValue}>
+                        {finalMileQueueRecord?.assigned_rider_name
+                          ? `${finalMileQueueRecord.assigned_rider_name}${finalMileQueueRecord.assigned_rider_phone ? ` • ${finalMileQueueRecord.assigned_rider_phone}` : ''}`
+                          : selectedShipment.final_mile_rider_id
+                            ? `Rider ${selectedShipment.final_mile_rider_id}`
+                            : 'No final-mile rider assigned yet'}
+                      </Text>
+                      <Text style={styles.pickupOpsAssignedMeta}>
+                        {terminalMap[selectedShipment.destination_terminal_id]?.name || 'Destination terminal'} • {selectedShipment.delivery_state || 'Unknown state'} • {selectedShipment.delivery_city || 'Unknown city'}
+                      </Text>
+                    </View>
+
+                    <TextInput
+                      style={styles.overrideInput}
+                      placeholder="Release context, assignment note, or transfer reason..."
+                      placeholderTextColor="#9ca3af"
+                      value={finalMileOpsReason}
+                      onChangeText={setFinalMileOpsReason}
+                      multiline
+                    />
+
+                    {selectedShipment.dispatch_stage === 'received_at_destination_terminal' ? (
+                      <View style={styles.pickupOpsActionRow}>
+                        <Pressable
+                          style={styles.pickupOpsReleaseBtn}
+                          onPress={() => handleReleaseFinalMileShipment(selectedShipment)}
+                          disabled={finalMileOpsBusy === 'release'}
+                        >
+                          <Text style={styles.pickupOpsReleaseText}>
+                            {finalMileOpsBusy === 'release' ? 'Releasing...' : 'Release To Final-Mile Queue'}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    ) : null}
+
+                    {selectedShipment.final_mile_rider_id ? (
+                      <View style={styles.pickupOpsActionRow}>
+                        <Pressable
+                          style={styles.pickupOpsReleaseBtn}
+                          onPress={() => handleUnassignFinalMileRider(selectedShipment)}
+                          disabled={finalMileOpsBusy === 'unassign-final-mile'}
+                        >
+                          <Text style={styles.pickupOpsReleaseText}>
+                            {finalMileOpsBusy === 'unassign-final-mile' ? 'Releasing...' : 'Unassign To Queue'}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    ) : null}
+
+                    <Text style={styles.pickupOpsListTitle}>Recommended Final-Mile Riders</Text>
+                    {finalMileCandidates.length === 0 ? (
+                      <Text style={styles.timelineEmpty}>No live final-mile riders currently match this destination queue.</Text>
+                    ) : (
+                      <View style={styles.pickupCandidateList}>
+                        {finalMileCandidates.map((candidate) => {
+                          const isAssigned = selectedShipment.final_mile_rider_id === candidate.rider_id;
+                          const isTransfer = !!selectedShipment.final_mile_rider_id && !isAssigned;
+                          const actionKey = `assign-final-mile:${candidate.rider_id}`;
+
+                          return (
+                            <View key={candidate.rider_id} style={styles.pickupCandidateCard}>
+                              <View style={{ flex: 1, gap: 4 }}>
+                                <Text style={styles.pickupCandidateTitle}>{candidate.rider_name || 'Eligible rider'}</Text>
+                                <Text style={styles.pickupCandidateMeta}>
+                                  {candidate.assigned_terminal_code || candidate.preferred_terminal_code || 'No hub code'} • Score {candidate.score ?? 'N/A'} • {candidate.is_online ? 'online' : 'offline'}
+                                </Text>
+                                <Text style={styles.pickupCandidateMeta}>
+                                  {candidate.operating_state || 'Unknown state'} • {candidate.operating_city || 'Unknown city'} • {candidate.rider_role || 'rider'}
+                                </Text>
+                                {candidate.rider_phone ? (
+                                  <Text style={styles.pickupCandidateMeta}>Phone: {candidate.rider_phone}</Text>
+                                ) : null}
+                              </View>
+                              <Pressable
+                                style={[
+                                  styles.pickupCandidateAction,
+                                  isAssigned && styles.pickupCandidateActionAssigned,
+                                ]}
+                                onPress={() => handleAssignFinalMileRider(selectedShipment, candidate)}
+                                disabled={isAssigned || finalMileOpsBusy === actionKey}
+                              >
+                                <Text style={[styles.pickupCandidateActionText, isAssigned && styles.pickupCandidateActionTextAssigned]}>
+                                  {isAssigned ? 'Assigned' : finalMileOpsBusy === actionKey ? 'Working...' : isTransfer ? 'Transfer' : 'Assign'}
+                                </Text>
+                              </Pressable>
+                            </View>
+                          );
+                        })}
+                      </View>
+                    )}
+                  </View>
+                )}
 
                 {isManagedFirstMileShipment(selectedShipment) && (
                   <View style={styles.pickupOpsSection}>
