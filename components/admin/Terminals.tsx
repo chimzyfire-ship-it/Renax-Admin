@@ -54,6 +54,23 @@ export default function Terminals() {
   const runAdvance = async (shipment: any) => {
     setBusyId(shipment.id);
     try {
+      if (shipment.dispatch_stage === 'received_at_destination_terminal' && shipment.relay_last_mile_strategy !== 'recipient_pickup') {
+        const { error } = await supabase.rpc('release_final_mile_to_marketplace', {
+          p_payload: {
+            shipment_id: shipment.id,
+            reason: 'Terminal ops released the shipment into the RENAX final-mile delivery queue.',
+          },
+        });
+        if (error) throw error;
+        await load();
+        return;
+      }
+
+      if (shipment.dispatch_stage === 'awaiting_final_mile_rider') {
+        await load();
+        return;
+      }
+
       await advanceShipmentStage(
         shipment.id,
         shipment.dispatch_stage || 'pending_routing',
@@ -199,7 +216,14 @@ export default function Terminals() {
                           : stageLabel(shipment.dispatch_stage || 'pending_routing')}
                       </Text>
                     </View>
-                    <Pressable style={styles.queueActionBtn} onPress={() => runAdvance(shipment)} disabled={busyId === shipment.id}>
+                    <Pressable
+                      style={[
+                        styles.queueActionBtn,
+                        shipment.dispatch_stage === 'awaiting_final_mile_rider' && { opacity: 0.5 },
+                      ]}
+                      onPress={() => runAdvance(shipment)}
+                      disabled={busyId === shipment.id || shipment.dispatch_stage === 'awaiting_final_mile_rider'}
+                    >
                       <Text style={styles.queueActionText}>
                         {busyId === shipment.id
                           ? '...'
@@ -207,7 +231,7 @@ export default function Terminals() {
                             ? shipment.relay_last_mile_strategy === 'recipient_pickup'
                               ? 'Confirm Pickup'
                               : 'Release Rider'
-                            : 'Open Queue'}
+                            : 'Manage In Ops'}
                       </Text>
                     </Pressable>
                   </View>
