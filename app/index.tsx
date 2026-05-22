@@ -72,6 +72,12 @@ export default function AdminScreen() {
   const [loading, setLoading] = useState(true);
   const [hasAdminClaim, setHasAdminClaim] = useState(false);
   const [currentMenu, setCurrentMenu] = useState<string>('dashboard');
+  const [shipmentFocus, setShipmentFocus] = useState<{
+    shipmentId?: string;
+    stage?: string;
+    terminalId?: string;
+    version: number;
+  }>({ version: 0 });
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session: nextSession } }) => {
@@ -104,7 +110,14 @@ export default function AdminScreen() {
   const renderContent = () => {
     switch (currentMenu) {
       case 'dashboard':
-        return <AdminDashboard />;
+        return (
+          <AdminDashboard
+            onOpenShipments={(params = {}) => {
+              setShipmentFocus((current) => ({ ...params, version: current.version + 1 }));
+              setCurrentMenu('shipments');
+            }}
+          />
+        );
       case 'track_shipments':
         return <TrackShipments />;
       case 'terminals':
@@ -122,7 +135,14 @@ export default function AdminScreen() {
       case 'settings':
         return <Settings />;
       case 'shipments':
-        return <Shipments />;
+        return (
+          <Shipments
+            initialShipmentId={shipmentFocus.shipmentId}
+            initialStageFilter={shipmentFocus.stage}
+            initialTerminalId={shipmentFocus.terminalId}
+            focusVersion={shipmentFocus.version}
+          />
+        );
       case 'notif_queue':
         return <NotificationQueue />;
       default:

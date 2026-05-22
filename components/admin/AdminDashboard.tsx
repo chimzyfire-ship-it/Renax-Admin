@@ -18,7 +18,11 @@ const formatDate = (dateStr: string) =>
     minute: '2-digit',
   });
 
-export default function AdminDashboard() {
+type AdminDashboardProps = {
+  onOpenShipments?: (params?: { shipmentId?: string; stage?: string; terminalId?: string }) => void;
+};
+
+export default function AdminDashboard({ onOpenShipments }: AdminDashboardProps) {
   const { width } = useWindowDimensions();
   const isCompact = width < 768;
   const isTablet = width < 1180;
@@ -122,8 +126,17 @@ export default function AdminDashboard() {
               const Icon = card.icon;
               const isGreen = card.theme === 'green';
               const isDanger = card.theme === 'danger';
+              const targetStage =
+                card.label === 'Terminal Backlog'
+                  ? 'awaiting_source_terminal'
+                  : card.label === 'Relay Shipments'
+                    ? undefined
+                    : card.label === 'Exceptions'
+                      ? 'exception'
+                      : undefined;
+
               return (
-                <View
+                <Pressable
                   key={card.label}
                   style={[
                     styles.statCard,
@@ -133,6 +146,7 @@ export default function AdminDashboard() {
                     isDanger && styles.dangerGlassCard,
                     glass,
                   ]}
+                  onPress={() => onOpenShipments?.({ stage: targetStage })}
                 >
                   <View style={{ flex: 1 }}>
                     <Text style={[styles.statLabel, isGreen && styles.statLabelWhite]}>{card.label}</Text>
@@ -159,7 +173,7 @@ export default function AdminDashboard() {
                   >
                     <Icon color={isGreen ? BRAND.green : isDanger ? BRAND.danger : BRAND.green} size={20} />
                   </View>
-                </View>
+                </Pressable>
               );
             })}
           </View>
@@ -176,13 +190,29 @@ export default function AdminDashboard() {
                   ['Awaiting Final Mile', stageBreakdown.awaiting_final_mile || 0, '#0EA5E9'],
                   ['Out For Delivery', stageBreakdown.out_for_delivery || 0, '#10B981'],
                   ['Exception', stageBreakdown.exception || 0, '#DC2626'],
-                ].map(([label, value, color]) => (
-                  <View key={String(label)} style={[styles.breakdownCard, isCompact && styles.breakdownCardCompact]}>
+                ].map(([label, value, color]) => {
+                  const stageMap: Record<string, string> = {
+                    'Awaiting Pickup': 'awaiting_rider_acceptance',
+                    'Awaiting Drop-Off': 'awaiting_source_terminal_dropoff',
+                    'At Source Hub': 'received_at_source_terminal',
+                    Linehaul: 'linehaul_in_transit',
+                    'Awaiting Final Mile': 'awaiting_final_mile_rider',
+                    'Out For Delivery': 'out_for_delivery',
+                    Exception: 'exception',
+                  };
+
+                  return (
+                  <Pressable
+                    key={String(label)}
+                    style={[styles.breakdownCard, isCompact && styles.breakdownCardCompact]}
+                    onPress={() => onOpenShipments?.({ stage: stageMap[String(label)] })}
+                  >
                     <View style={[styles.breakdownDot, { backgroundColor: String(color) }]} />
                     <Text style={styles.breakdownLabel}>{String(label)}</Text>
                     <Text style={styles.breakdownValue}>{String(value)}</Text>
-                  </View>
-                ))}
+                  </Pressable>
+                  );
+                })}
               </View>
 
               <Text style={[styles.sectionTitle, { marginTop: 8 }]}>Recent Shipments</Text>
@@ -204,7 +234,7 @@ export default function AdminDashboard() {
                       const routingMode = shipment.routing_mode || 'last_mile_local';
                       const color = stageColor(stage);
                       return (
-                        <View key={shipment.id} style={styles.tableRow}>
+                        <Pressable key={shipment.id} style={styles.tableRow} onPress={() => onOpenShipments?.({ shipmentId: shipment.id })}>
                           <Text style={[styles.tableCell, { flex: 1.1, fontWeight: '700', color: '#003822' }]}>{shipment.tracking_id || shipment.id}</Text>
                           <Text style={[styles.tableCell, { flex: 1.4 }]}>{`${shipment.pickup_state || 'Unknown'} -> ${shipment.delivery_state || 'Unknown'}`}</Text>
                           <Text style={[styles.tableCell, { flex: 1.1 }]}>
@@ -215,7 +245,7 @@ export default function AdminDashboard() {
                             <Text style={styles.tableMeta}>{shipmentStatusLabel(stage, routingMode)}</Text>
                           </View>
                           <Text style={[styles.tableCell, { flex: 0.9, fontWeight: '700' }]}>{formatAmount(shipment.estimated_price || 0)}</Text>
-                        </View>
+                        </Pressable>
                       );
                     })
                   )}
@@ -229,7 +259,7 @@ export default function AdminDashboard() {
                 <Text style={styles.emptyText}>No terminals found.</Text>
               ) : (
                 terminalLoads.map((terminal: any) => (
-                  <View key={terminal.id} style={styles.terminalCard}>
+                  <Pressable key={terminal.id} style={styles.terminalCard} onPress={() => onOpenShipments?.({ terminalId: terminal.id })}>
                     <View style={styles.terminalHeader}>
                       <View>
                         <Text style={styles.terminalTitle}>{terminal.name}</Text>
@@ -245,7 +275,7 @@ export default function AdminDashboard() {
                       <Text style={styles.terminalStat}>Arrivals {terminal.destinationQueue}</Text>
                       <Text style={styles.terminalStat}>Final Mile {terminal.finalMileQueue}</Text>
                     </View>
-                  </View>
+                  </Pressable>
                 ))
               )}
 
