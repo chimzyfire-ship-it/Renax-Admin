@@ -542,12 +542,12 @@ export async function removeFleetStaffFromOps(riderId: string) {
       .from('shipments')
       .update({
         first_mile_pickup_agent_id: null,
-        dispatch_stage: 'awaiting_source_terminal',
-        status: 'in_progress',
+        dispatch_stage: 'awaiting_rider_acceptance',
+        status: 'pending',
         updated_at: nowIso,
       })
       .eq('first_mile_pickup_agent_id', riderId)
-      .in('dispatch_stage', ['awaiting_source_terminal']),
+      .in('dispatch_stage', ['awaiting_rider_acceptance', 'awaiting_source_terminal']),
     pickupAgentIds.length
       ? supabase
           .from('pickup_requests')
