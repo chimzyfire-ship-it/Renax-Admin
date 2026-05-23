@@ -106,7 +106,14 @@ const EXCEPTION_TYPES = [
   { key: 'unavailable',      label: 'Customer Unavailable',   color: '#6B7280', note: 'Customer was unreachable at point of delivery.' },
 ];
 
-export default function Shipments() {
+type ShipmentsProps = {
+  initialShipmentId?: string;
+  initialStageFilter?: string;
+  initialTerminalId?: string;
+  focusVersion?: number;
+};
+
+export default function Shipments({ initialShipmentId, initialStageFilter, initialTerminalId, focusVersion = 0 }: ShipmentsProps) {
   const glass = Platform.OS === 'web' ? { backdropFilter: 'blur(16px)' } : {};
   const [searchQuery, setSearchQuery] = useState('');
   const [shipments, setShipments] = useState<any[]>([]);
@@ -116,6 +123,7 @@ export default function Shipments() {
   const [proofRecords, setProofRecords] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('All');
+  const [terminalFilterId, setTerminalFilterId] = useState<string | null>(null);
   const [suggestionFilter, setSuggestionFilter] = useState<'all'|'pending'|'accepted'|'dismissed'|'low'>('all');
   const [selectedShipment, setSelectedShipment] = useState<any | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -213,8 +221,11 @@ export default function Shipments() {
       || shipment.delivery_address?.toLowerCase().includes(query);
     const currentStage = shipment.dispatch_stage || 'pending_routing';
     const statusMatch = statusFilter === 'All' || currentStage === statusFilter;
-    return queryMatch && statusMatch;
-  }), [shipments, searchQuery, statusFilter]);
+    const terminalMatch = !terminalFilterId
+      || shipment.source_terminal_id === terminalFilterId
+      || shipment.destination_terminal_id === terminalFilterId;
+    return queryMatch && statusMatch && terminalMatch;
+  }), [shipments, searchQuery, statusFilter, terminalFilterId]);
 
   const isManagedFirstMileShipment = (shipment: any) =>
     shipment?.routing_mode === 'relay_terminal' && shipment?.relay_first_mile_strategy === 'renax_pickup';
@@ -346,6 +357,41 @@ export default function Shipments() {
       loadFinalMileOpsContext(shipment),
     ]);
   };
+
+  useEffect(() => {
+    if (initialStageFilter) {
+      setStatusFilter(initialStageFilter);
+    } else if (focusVersion > 0 && !initialShipmentId) {
+      setStatusFilter('All');
+    }
+
+    setTerminalFilterId(initialTerminalId || null);
+    if (initialShipmentId) {
+      setSearchQuery('');
+    }
+  }, [focusVersion, initialShipmentId, initialStageFilter, initialTerminalId]);
+
+  useEffect(() => {
+    if (!initialShipmentId || loading) return;
+
+    const existing = shipments.find((shipment) => shipment.id === initialShipmentId);
+    if (existing) {
+      void loadShipmentDetails(existing);
+      return;
+    }
+
+    void (async () => {
+      const { data } = await supabase
+        .from('shipments')
+        .select('*')
+        .eq('id', initialShipmentId)
+        .maybeSingle();
+
+      if (data) {
+        await loadShipmentDetails(data);
+      }
+    })();
+  }, [focusVersion, initialShipmentId, loading, shipments]);
 
   const handleApplySuggestion = async (shipment: any, suggestion: any) => {
     setBusyId(shipment.id);
@@ -926,6 +972,14 @@ export default function Shipments() {
             );
           })}
         </ScrollView>
+
+        {terminalFilterId ? (
+          <Pressable style={styles.activeFilterPill} onPress={() => setTerminalFilterId(null)}>
+            <Text style={styles.activeFilterPillText}>
+              Hub: {terminalMap[terminalFilterId]?.code || 'Selected terminal'} ×
+            </Text>
+          </Pressable>
+        ) : null}
       </View>
 
       <View style={[styles.tableContainer, glass]}>
@@ -1555,6 +1609,8 @@ const styles = StyleSheet.create({
   filterChipActive: { backgroundColor: BRAND.lime, borderColor: BRAND.lime },
   filterChipText: { fontSize: 12, color: '#374151', fontWeight: '600' },
   filterChipTextActive: { color: '#002B22' },
+  activeFilterPill: { alignSelf: 'flex-start', backgroundColor: '#ECFDF5', borderWidth: 1, borderColor: '#A7F3D0', borderRadius: 999, paddingHorizontal: 14, paddingVertical: 9 },
+  activeFilterPillText: { color: '#047857', fontSize: 12, fontWeight: '800' },
   tableContainer: { backgroundColor: 'rgba(255,255,255,0.95)', borderRadius: 16, padding: 24, flex: 1, elevation: 2, minHeight: 500 },
   centerState: { flex: 1, minHeight: 240, alignItems: 'center', justifyContent: 'center' },
   tableHeader: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: 'rgba(0,0,0,0.08)', paddingBottom: 16, marginBottom: 10 },
