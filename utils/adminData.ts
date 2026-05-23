@@ -319,18 +319,296 @@ export async function updateFleetVehicleStatus(riderId: string, nextStatus: stri
     .eq('rider_id', riderId)
     .maybeSingle();
 
+  const normalizedStatus = String(nextStatus || 'offline').toLowerCase();
+  const isOnline = normalizedStatus === 'available' || normalizedStatus === 'busy';
   const nextMetadata = {
     ...(existing?.metadata || {}),
-    status: nextStatus,
+    status: normalizedStatus,
     updated_by_admin_at: new Date().toISOString(),
   };
 
   const { error } = await supabase
     .from('rider_locations')
-    .update({ metadata: nextMetadata, updated_at: new Date().toISOString() })
+    .update({
+      is_online: isOnline,
+      metadata: nextMetadata,
+      updated_at: new Date().toISOString(),
+      last_seen: new Date().toISOString(),
+    })
     .eq('rider_id', riderId);
 
   if (error) throw error;
+
+  const agentPatch: Record<string, any> = {
+    availability_status: ['available', 'busy', 'maintenance'].includes(normalizedStatus) ? normalizedStatus : 'offline',
+    updated_at: new Date().toISOString(),
+  };
+
+  if (normalizedStatus === 'available') {
+    agentPatch.last_available_at = new Date().toISOString();
+  }
+
+  await supabase
+    .from('first_mile_pickup_agents')
+    .update(agentPatch)
+    .eq('driver_id', riderId);
+}
+
+const parseCsvList = (value?: string | string[] | null) => {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim().toLowerCase()).filter(Boolean);
+  }
+
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+};
+
+const normalizeVehicleType = (vehicleType?: string | null) => {
+  const value = String(vehicleType || 'bike').trim().toLowerCase().replace(/\s+/g, '_');
+  if (value === 'motorcycle') return 'bike';
+  if (value === 'cold_chain') return 'cold_chain_van';
+  if (['bike', 'tricycle', 'car', 'van', 'mini_truck', 'truck', 'cold_chain_van', 'cold_chain_truck', 'other'].includes(value)) {
+    return value;
+  }
+  return 'other';
+};
+
+export async function enrollFleetStaff(payload: {
+  userId: string;
+  fullName?: string;
+  phoneNumber?: string;
+  role?: string;
+  serviceProfile?: 'final_mile' | 'first_mile' | 'dual';
+  state?: string;
+  city?: string;
+  vehicleId?: string;
+  vehicleCode?: string;
+  vehicleType?: string;
+  plateNumber?: string;
+  capacityKg?: string | number | null;
+  capacityVolumeCm3?: string | number | null;
+  maxParcelCount?: string | number | null;
+  goodsCapabilities?: string | string[] | null;
+  assignedTerminalId?: string | null;
+}) {
+  const userId = String(payload.userId || '').trim();
+  if (!userId) throw new Error('Existing user UUID is required');
+
+  const serviceProfile = payload.serviceProfile || 'final_mile';
+  const profileRole = payload.role || (serviceProfile === 'final_mile' ? 'rider' : 'driver');
+  const terminalId = payload.assignedTerminalId || null;
+  const { data: terminal } = terminalId
+    ? await supabase.from('terminals').select('*').eq('id', terminalId).maybeSingle()
+    : { data: null } as any;
+  const nowIso = new Date().toISOString();
+  const state = String(payload.state || terminal?.state || '').trim();
+  const city = String(payload.city || terminal?.city || '').trim();
+  const vehicleType = normalizeVehicleType(payload.vehicleType);
+  const vehicleCode = String(payload.vehicleCode || payload.vehicleId || `RENAX-${userId.slice(0, 8)}`).trim().toUpperCase();
+  const vehicleId = String(payload.vehicleId || vehicleCode).trim().toUpperCase();
+  const baseRoles = new Set<string>([profileRole, profileRole === 'driver' ? 'driver' : 'rider']);
+
+  if (serviceProfile === 'first_mile' || serviceProfile === 'dual') baseRoles.add('first_mile_pickup');
+  if (serviceProfile === 'final_mile' || serviceProfile === 'dual') {
+    baseRoles.add('rider');
+    baseRoles.add('final_mile');
+  }
+
+  const logisticsRoles = Array.from(baseRoles);
+  const { error: profileError } = await supabase
+    .from('profiles')
+    .upsert({
+      id: userId,
+      full_name: payload.fullName?.trim() || null,
+      phone_number: payload.phoneNumber?.trim() || null,
+      role: profileRole,
+      state: state || null,
+      city: city || null,
+      logistics_roles: logisticsRoles,
+      assigned_terminal_id: terminal?.id || null,
+      preferred_terminal_code: terminal?.code || null,
+      is_online: false,
+      updated_at: nowIso,
+    }, { onConflict: 'id' });
+
+  if (profileError) throw profileError;
+
+  const locationMetadata = {
+    driver_name: payload.fullName?.trim() || null,
+    vehicle_id: vehicleId,
+    vehicle_code: vehicleCode,
+    vehicle_type: vehicleType,
+    plate_number: payload.plateNumber?.trim() || null,
+    status: 'offline',
+    state: state || null,
+    city: city || null,
+    terminal_code: terminal?.code || null,
+    assigned_terminal_id: terminal?.id || null,
+    assigned_terminal_name: terminal?.name || null,
+    first_mile_pickup_capable: serviceProfile === 'first_mile' || serviceProfile === 'dual',
+    final_mile_capable: serviceProfile === 'final_mile' || serviceProfile === 'dual',
+    enrolled_by_admin_at: nowIso,
+  };
+
+  const { error: locationError } = await supabase
+    .from('rider_locations')
+    .upsert({
+      rider_id: userId,
+      lat: Number(terminal?.lat ?? 9.0765),
+      lng: Number(terminal?.lng ?? 7.3986),
+      is_online: false,
+      current_shipment_id: null,
+      metadata: locationMetadata,
+      last_seen: nowIso,
+      updated_at: nowIso,
+    }, { onConflict: 'rider_id' });
+
+  if (locationError) throw locationError;
+
+  if (serviceProfile === 'first_mile' || serviceProfile === 'dual') {
+    const goodsCapabilities = parseCsvList(payload.goodsCapabilities);
+    const firstMilePayload = {
+      driver_id: userId,
+      vehicle_code: vehicleCode,
+      vehicle_type: vehicleType,
+      plate_number: payload.plateNumber?.trim() || null,
+      home_terminal_id: terminal?.id || null,
+      home_state: state || terminal?.state || 'Lagos',
+      home_city: city || terminal?.city || null,
+      service_states: state ? [state] : [],
+      service_cities: city ? [city] : [],
+      capacity_kg: payload.capacityKg ? Number(payload.capacityKg) : null,
+      capacity_volume_cm3: payload.capacityVolumeCm3 ? Number(payload.capacityVolumeCm3) : null,
+      max_parcel_count: payload.maxParcelCount ? Number(payload.maxParcelCount) : null,
+      goods_capabilities: goodsCapabilities.length ? goodsCapabilities : ['documents', 'fragile', 'agro', 'refrigerated', 'general'],
+      cold_chain_enabled: vehicleType.includes('cold_chain'),
+      registration_status: 'active',
+      availability_status: 'offline',
+      metadata: { enrolled_from_admin: true, service_profile: serviceProfile },
+      updated_at: nowIso,
+    };
+
+    const { data: existingAgent, error: existingAgentError } = await supabase
+      .from('first_mile_pickup_agents')
+      .select('id')
+      .eq('driver_id', userId)
+      .in('registration_status', ['pending_approval', 'active', 'suspended'])
+      .maybeSingle();
+
+    if (existingAgentError) throw existingAgentError;
+
+    const agentQuery = existingAgent?.id
+      ? supabase.from('first_mile_pickup_agents').update(firstMilePayload).eq('id', existingAgent.id)
+      : supabase.from('first_mile_pickup_agents').insert(firstMilePayload);
+
+    const { error: agentError } = await agentQuery;
+    if (agentError) throw agentError;
+  }
+}
+
+export async function removeFleetStaffFromOps(riderId: string) {
+  const nowIso = new Date().toISOString();
+  const { data: pickupAgentRows } = await supabase
+    .from('first_mile_pickup_agents')
+    .select('id')
+    .eq('driver_id', riderId)
+    .in('registration_status', ['pending_approval', 'active', 'suspended']);
+  const pickupAgentIds = (pickupAgentRows || []).map((row: any) => row.id).filter(Boolean);
+
+  await Promise.all([
+    supabase
+      .from('shipments')
+      .update({
+        assigned_rider_id: null,
+        dispatch_stage: 'awaiting_rider_acceptance',
+        status: 'pending',
+        updated_at: nowIso,
+      })
+      .eq('assigned_rider_id', riderId)
+      .in('dispatch_stage', ['awaiting_rider_acceptance', 'out_for_delivery']),
+    supabase
+      .from('shipments')
+      .update({
+        final_mile_rider_id: null,
+        dispatch_stage: 'awaiting_final_mile_rider',
+        status: 'in_progress',
+        updated_at: nowIso,
+      })
+      .eq('final_mile_rider_id', riderId)
+      .in('dispatch_stage', ['awaiting_final_mile_rider', 'out_for_delivery']),
+    supabase
+      .from('shipments')
+      .update({
+        first_mile_pickup_agent_id: null,
+        dispatch_stage: 'awaiting_source_terminal',
+        status: 'in_progress',
+        updated_at: nowIso,
+      })
+      .eq('first_mile_pickup_agent_id', riderId)
+      .in('dispatch_stage', ['awaiting_source_terminal']),
+    pickupAgentIds.length
+      ? supabase
+          .from('pickup_requests')
+          .update({
+            assigned_agent_id: null,
+            orchestration_status: 'awaiting_assignment',
+            failure_reason: 'Assigned pickup driver was removed from the ops roster.',
+            updated_at: nowIso,
+          })
+          .in('assigned_agent_id', pickupAgentIds)
+          .in('orchestration_status', ['assignment_in_progress', 'assigned', 'en_route'])
+      : Promise.resolve({ error: null } as any),
+  ]);
+
+  const { error: profileError } = await supabase
+    .from('profiles')
+    .update({
+      role: 'customer',
+      logistics_roles: [],
+      assigned_terminal_id: null,
+      preferred_terminal_code: null,
+      is_online: false,
+      updated_at: nowIso,
+    })
+    .eq('id', riderId);
+
+  if (profileError) throw profileError;
+
+  const { data: existingLocation } = await supabase
+    .from('rider_locations')
+    .select('metadata')
+    .eq('rider_id', riderId)
+    .maybeSingle();
+
+  const { error: locationError } = await supabase
+    .from('rider_locations')
+    .update({
+      is_online: false,
+      current_shipment_id: null,
+      metadata: {
+        ...(existingLocation?.metadata || {}),
+        status: 'offline',
+        removed_from_ops: true,
+        removed_from_ops_at: nowIso,
+      },
+      updated_at: nowIso,
+      last_seen: nowIso,
+    })
+    .eq('rider_id', riderId);
+
+  if (locationError) throw locationError;
+
+  await supabase
+    .from('first_mile_pickup_agents')
+    .update({
+      registration_status: 'retired',
+      availability_status: 'offline',
+      updated_at: nowIso,
+    })
+    .eq('driver_id', riderId)
+    .in('registration_status', ['pending_approval', 'active', 'suspended']);
 }
 
 export async function fetchAnalyticsData(rangeKey = '30d') {

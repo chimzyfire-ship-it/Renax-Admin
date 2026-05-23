@@ -106,6 +106,17 @@ const EXCEPTION_TYPES = [
   { key: 'unavailable',      label: 'Customer Unavailable',   color: '#6B7280', note: 'Customer was unreachable at point of delivery.' },
 ];
 
+const OPERATOR_STAGE_ACTIONS = [
+  { stage: 'awaiting_rider_acceptance', label: 'Rider Queue' },
+  { stage: 'awaiting_source_terminal', label: 'Pickup To Hub' },
+  { stage: 'received_at_source_terminal', label: 'At Source Hub' },
+  { stage: 'linehaul_in_transit', label: 'Linehaul' },
+  { stage: 'received_at_destination_terminal', label: 'At Destination Hub' },
+  { stage: 'awaiting_final_mile_rider', label: 'Final-Mile Queue' },
+  { stage: 'out_for_delivery', label: 'Out For Delivery' },
+  { stage: 'delivered', label: 'Delivered' },
+];
+
 type ShipmentsProps = {
   initialShipmentId?: string;
   initialStageFilter?: string;
@@ -147,6 +158,10 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
   const [finalMileOpsLoading, setFinalMileOpsLoading] = useState(false);
   const [finalMileOpsBusy, setFinalMileOpsBusy] = useState<string | null>(null);
   const [finalMileOpsReason, setFinalMileOpsReason] = useState('');
+  const [localRiderCandidates, setLocalRiderCandidates] = useState<any[]>([]);
+  const [localRiderOpsLoading, setLocalRiderOpsLoading] = useState(false);
+  const [localRiderOpsBusy, setLocalRiderOpsBusy] = useState<string | null>(null);
+  const [localRiderOpsReason, setLocalRiderOpsReason] = useState('');
 
   const terminalMap = useMemo(
     () => Object.fromEntries(terminals.map((terminal) => [terminal.id, terminal])),
@@ -232,6 +247,22 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
 
   const isManagedFinalMileShipment = (shipment: any) =>
     shipment?.routing_mode === 'relay_terminal' && shipment?.relay_last_mile_strategy === 'renax_delivery';
+
+  const isLocalRiderManagedShipment = (shipment: any) =>
+    shipment?.routing_mode !== 'relay_terminal' || !!shipment?.assigned_rider_id;
+
+  const locationNameForStage = (shipment: any, stage: string) => {
+    if (stage === 'received_at_source_terminal' || stage === 'linehaul_in_transit') {
+      return terminalMap[shipment.source_terminal_id]?.name || shipment.pickup_state || shipment.pickup_address;
+    }
+    if (stage === 'received_at_destination_terminal' || stage === 'awaiting_final_mile_rider') {
+      return terminalMap[shipment.destination_terminal_id]?.name || shipment.delivery_state || shipment.delivery_address;
+    }
+    if (stage === 'awaiting_source_terminal') {
+      return shipment.pickup_address || shipment.pickup_state;
+    }
+    return shipment.delivery_address || shipment.delivery_state || shipment.pickup_address || shipment.pickup_state;
+  };
 
   const loadPickupOpsContext = useCallback(async (shipment: any) => {
     if (!isManagedFirstMileShipment(shipment)) {
@@ -326,6 +357,74 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
     }
   }, []);
 
+  const loadLocalRiderOpsContext = useCallback(async (shipment: any) => {
+    if (!isLocalRiderManagedShipment(shipment)) {
+      setLocalRiderCandidates([]);
+      return;
+    }
+
+    setLocalRiderOpsLoading(true);
+    try {
+      const { data: riderRows } = await supabase
+        .from('rider_locations')
+        .select('rider_id, is_online, current_shipment_id, last_seen, lat, lng, metadata, profiles(id, full_name, phone_number, role, state, city, logistics_roles, assigned_terminal_id, preferred_terminal_code)')
+        .order('last_seen', { ascending: false })
+        .limit(80);
+
+      const pickupState = String(shipment.pickup_state || '').toLowerCase();
+      const deliveryState = String(shipment.delivery_state || '').toLowerCase();
+      const pickupCity = String(shipment.pickup_city || '').toLowerCase();
+      const deliveryCity = String(shipment.delivery_city || '').toLowerCase();
+
+      const candidates = (riderRows || [])
+        .map((row: any) => {
+          const profile = row.profiles || {};
+          const logisticsRoles = profile.logistics_roles || [];
+          const role = String(profile.role || '').toLowerCase();
+          const operatingState = String(profile.state || row.metadata?.state || '').toLowerCase();
+          const operatingCity = String(profile.city || row.metadata?.city || '').toLowerCase();
+          const roleMatch = ['rider', 'driver'].includes(role)
+            && (
+              logisticsRoles.length === 0
+              || logisticsRoles.some((item: string) => ['rider', 'final_mile', 'driver'].includes(String(item).toLowerCase()))
+            );
+          const busyElsewhere = row.current_shipment_id && row.current_shipment_id !== shipment.id;
+          const stateMatch = operatingState && [pickupState, deliveryState].filter(Boolean).includes(operatingState);
+          const cityMatch = operatingCity && [pickupCity, deliveryCity].filter(Boolean).includes(operatingCity);
+          const liveScore = row.is_online ? 25 : 0;
+          const availabilityScore = busyElsewhere ? -50 : 20;
+          const locationScore = cityMatch ? 25 : stateMatch ? 18 : 5;
+          const assignmentScore = shipment.assigned_rider_id === row.rider_id ? 100 : liveScore + availabilityScore + locationScore;
+
+          return {
+            rider_id: row.rider_id,
+            rider_name: profile.full_name || row.metadata?.driver_name || 'Rider',
+            rider_phone: profile.phone_number || 'N/A',
+            rider_role: role || 'rider',
+            logistics_roles: logisticsRoles,
+            operating_state: profile.state || row.metadata?.state || 'Unknown state',
+            operating_city: profile.city || row.metadata?.city || 'Unknown city',
+            vehicle_type: row.metadata?.vehicle_type || 'Motorcycle',
+            vehicle_id: row.metadata?.vehicle_id || row.metadata?.vehicle_code || `RID-${String(row.rider_id).slice(0, 6).toUpperCase()}`,
+            terminal_code: row.metadata?.terminal_code || profile.preferred_terminal_code || 'N/A',
+            is_online: row.is_online,
+            current_shipment_id: row.current_shipment_id,
+            busy_elsewhere: busyElsewhere,
+            last_seen: row.last_seen,
+            metadata: row.metadata || {},
+            score: assignmentScore,
+            role_match: roleMatch,
+          };
+        })
+        .filter((candidate) => candidate.role_match && !candidate.busy_elsewhere)
+        .sort((left, right) => Number(right.score || 0) - Number(left.score || 0));
+
+      setLocalRiderCandidates(candidates.slice(0, 10));
+    } finally {
+      setLocalRiderOpsLoading(false);
+    }
+  }, []);
+
   const loadShipmentDetails = async (shipment: any) => {
     setSelectedShipment(shipment);
     const [{ data: eventData }, { data: suggestionData }, { data: proofData }] = await Promise.all([
@@ -349,12 +448,14 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
     setOverrideReason('');
     setPickupOpsReason('');
     setFinalMileOpsReason('');
+    setLocalRiderOpsReason('');
     setShowOverrideInput(false);
     setShowExceptionMenu(false);
     setShowHubScan(false);
     await Promise.all([
       loadPickupOpsContext(shipment),
       loadFinalMileOpsContext(shipment),
+      loadLocalRiderOpsContext(shipment),
     ]);
   };
 
@@ -583,6 +684,198 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
       if (selectedShipment?.id === shipment.id) await loadShipmentDetails(shipment);
     } finally {
       setBusyId(null);
+    }
+  };
+
+  const releaseRiderLocation = async (riderId?: string | null, nextStatus = 'available') => {
+    if (!riderId) return;
+
+    const { data: existingLocation } = await supabase
+      .from('rider_locations')
+      .select('metadata')
+      .eq('rider_id', riderId)
+      .maybeSingle();
+
+    const { error: locationError } = await supabase
+      .from('rider_locations')
+      .update({
+        current_shipment_id: null,
+        is_online: nextStatus === 'available',
+        metadata: {
+          ...(existingLocation?.metadata || {}),
+          status: nextStatus,
+          updated_by_admin_at: new Date().toISOString(),
+        },
+        updated_at: new Date().toISOString(),
+      })
+      .eq('rider_id', riderId);
+
+    if (locationError) throw locationError;
+
+    await supabase
+      .from('first_mile_pickup_agents')
+      .update({
+        availability_status: nextStatus === 'maintenance' ? 'maintenance' : nextStatus === 'available' ? 'available' : 'offline',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('driver_id', riderId);
+  };
+
+  const handleForceSetStage = async (shipment: any, targetStage: string) => {
+    const reason = overrideReason.trim() || `Admin manually moved shipment to ${stageLabel(targetStage)}.`;
+    setBusyId(`stage:${shipment.id}:${targetStage}`);
+    try {
+      const { error: shipmentError } = await supabase
+        .from('shipments')
+        .update({
+          dispatch_stage: targetStage,
+          status: shipmentStatusFromStage(targetStage, shipment.routing_mode || 'last_mile_local'),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', shipment.id);
+
+      if (shipmentError) throw shipmentError;
+
+      await logShipmentEvent(
+        shipment.id,
+        targetStage as any,
+        locationNameForStage(shipment, targetStage),
+        undefined,
+        'admin',
+        reason
+      );
+
+      setOverrideReason('');
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleCancelShipment = async (shipment: any) => {
+    const reason = overrideReason.trim() || 'Admin cancelled shipment and released all active assignments.';
+    setBusyId(`cancel:${shipment.id}`);
+    try {
+      const { error: shipmentError } = await supabase
+        .from('shipments')
+        .update({
+          dispatch_stage: 'cancelled',
+          status: 'cancelled',
+          assigned_rider_id: null,
+          final_mile_rider_id: null,
+          first_mile_pickup_agent_id: null,
+          active_pickup_request_id: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', shipment.id);
+
+      if (shipmentError) throw shipmentError;
+
+      await supabase
+        .from('pickup_requests')
+        .update({
+          orchestration_status: 'cancelled',
+          cancelled_at: new Date().toISOString(),
+          failure_reason: reason,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('shipment_id', shipment.id)
+        .in('orchestration_status', ['submitted', 'awaiting_assignment', 'assignment_in_progress', 'assigned', 'en_route', 'picked_up']);
+
+      if (pickupQueueRecord?.assigned_agent_id) {
+        await supabase
+          .from('first_mile_pickup_agents')
+          .update({ availability_status: 'available', updated_at: new Date().toISOString() })
+          .eq('id', pickupQueueRecord.assigned_agent_id);
+      }
+
+      await Promise.all([
+        releaseRiderLocation(shipment.assigned_rider_id),
+        releaseRiderLocation(shipment.final_mile_rider_id),
+        releaseRiderLocation(shipment.first_mile_pickup_agent_id),
+      ]);
+
+      await logShipmentEvent(shipment.id, 'cancelled', locationNameForStage(shipment, 'cancelled'), undefined, 'admin', reason);
+      setOverrideReason('');
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleAssignLocalRider = async (shipment: any, candidate: any) => {
+    const actionKey = `assign-local:${candidate.rider_id}`;
+    const reason = localRiderOpsReason.trim() || `Ops assigned ${candidate.rider_name || 'a rider'} to this shipment.`;
+    const nextStage = ['pending_routing', 'exception', 'cancelled'].includes(shipment.dispatch_stage || '')
+      ? 'awaiting_rider_acceptance'
+      : shipment.dispatch_stage || 'awaiting_rider_acceptance';
+
+    setLocalRiderOpsBusy(actionKey);
+    try {
+      if (shipment.assigned_rider_id && shipment.assigned_rider_id !== candidate.rider_id) {
+        await releaseRiderLocation(shipment.assigned_rider_id);
+      }
+
+      const { error: shipmentError } = await supabase
+        .from('shipments')
+        .update({
+          assigned_rider_id: candidate.rider_id,
+          dispatch_stage: nextStage,
+          status: shipmentStatusFromStage(nextStage, shipment.routing_mode || 'last_mile_local'),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', shipment.id);
+
+      if (shipmentError) throw shipmentError;
+
+      const { error: riderLocationError } = await supabase
+        .from('rider_locations')
+        .update({
+          current_shipment_id: shipment.id,
+          metadata: {
+            ...(candidate.metadata || {}),
+            status: 'busy',
+            assigned_by_admin_at: new Date().toISOString(),
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq('rider_id', candidate.rider_id);
+
+      if (riderLocationError) throw riderLocationError;
+
+      await logShipmentEvent(shipment.id, nextStage as any, locationNameForStage(shipment, nextStage), candidate.rider_id, 'admin', reason);
+      setLocalRiderOpsReason('');
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setLocalRiderOpsBusy(null);
+    }
+  };
+
+  const handleUnassignLocalRider = async (shipment: any) => {
+    if (!shipment.assigned_rider_id) return;
+
+    const reason = localRiderOpsReason.trim() || 'Ops released the assigned rider and returned this shipment to the rider queue.';
+    const nextStage = shipment.dispatch_stage === 'out_for_delivery' ? 'awaiting_rider_acceptance' : shipment.dispatch_stage || 'awaiting_rider_acceptance';
+    setLocalRiderOpsBusy('unassign-local');
+    try {
+      const { error: shipmentError } = await supabase
+        .from('shipments')
+        .update({
+          assigned_rider_id: null,
+          dispatch_stage: nextStage,
+          status: shipmentStatusFromStage(nextStage, shipment.routing_mode || 'last_mile_local'),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', shipment.id);
+
+      if (shipmentError) throw shipmentError;
+
+      await releaseRiderLocation(shipment.assigned_rider_id);
+      await logShipmentEvent(shipment.id, nextStage as any, locationNameForStage(shipment, nextStage), undefined, 'admin', reason);
+      setLocalRiderOpsReason('');
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setLocalRiderOpsBusy(null);
     }
   };
 
@@ -1156,6 +1449,162 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
                     </View>
                   ))}
                 </View>
+
+                <View style={styles.opsControlSection}>
+                  <View style={styles.pickupOpsHeader}>
+                    <View>
+                      <Text style={styles.pickupOpsTitle}>Admin Control Center</Text>
+                      <Text style={styles.pickupOpsSub}>Override shipment stage, cancel work, and recover stuck dispatch states from one place.</Text>
+                    </View>
+                    <View style={styles.opsStatusBadge}>
+                      <Text style={styles.opsStatusBadgeText}>{shipmentStatusLabel(selectedShipment.dispatch_stage || 'pending_routing', selectedShipment.routing_mode || 'last_mile_local')}</Text>
+                    </View>
+                  </View>
+
+                  <TextInput
+                    style={styles.overrideInput}
+                    placeholder="Operator note for the next admin action..."
+                    placeholderTextColor="#9ca3af"
+                    value={overrideReason}
+                    onChangeText={setOverrideReason}
+                    multiline
+                  />
+
+                  <View style={styles.opsStageGrid}>
+                    {OPERATOR_STAGE_ACTIONS.map((action) => {
+                      const active = selectedShipment.dispatch_stage === action.stage;
+                      const actionKey = `stage:${selectedShipment.id}:${action.stage}`;
+                      return (
+                        <Pressable
+                          key={action.stage}
+                          style={[styles.opsStageBtn, active && styles.opsStageBtnActive]}
+                          onPress={() => handleForceSetStage(selectedShipment, action.stage)}
+                          disabled={active || busyId === actionKey}
+                        >
+                          <Text style={[styles.opsStageBtnText, active && styles.opsStageBtnTextActive]}>
+                            {busyId === actionKey ? 'Saving...' : action.label}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+
+                  <View style={styles.pickupOpsActionRow}>
+                    <Pressable
+                      style={styles.modalActionSecondary}
+                      onPress={() => handleReroute(selectedShipment)}
+                      disabled={busyId === selectedShipment.id}
+                    >
+                      <Text style={styles.modalActionSecondaryText}>Re-run Routing</Text>
+                    </Pressable>
+                    <Pressable
+                      style={styles.pickupOpsReleaseBtn}
+                      onPress={() => handleForceSetStage(selectedShipment, 'pending_routing')}
+                      disabled={busyId === `stage:${selectedShipment.id}:pending_routing`}
+                    >
+                      <Text style={styles.pickupOpsReleaseText}>
+                        {busyId === `stage:${selectedShipment.id}:pending_routing` ? 'Resetting...' : 'Reset To Routing'}
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      style={styles.opsCancelBtn}
+                      onPress={() => handleCancelShipment(selectedShipment)}
+                      disabled={busyId === `cancel:${selectedShipment.id}`}
+                    >
+                      <Text style={styles.opsCancelText}>
+                        {busyId === `cancel:${selectedShipment.id}` ? 'Cancelling...' : 'Cancel Shipment'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
+
+                {isLocalRiderManagedShipment(selectedShipment) && (
+                  <View style={styles.pickupOpsSection}>
+                    <View style={styles.pickupOpsHeader}>
+                      <View>
+                        <Text style={styles.pickupOpsTitle}>Local Rider Assignment</Text>
+                        <Text style={styles.pickupOpsSub}>Manually assign, transfer, or release same-state and manual-review shipments.</Text>
+                      </View>
+                      {localRiderOpsLoading ? <ActivityIndicator color={BRAND.green} size="small" /> : null}
+                    </View>
+
+                    <View style={styles.pickupOpsAssignedCard}>
+                      <Text style={styles.pickupOpsAssignedLabel}>Current Rider</Text>
+                      <Text style={styles.pickupOpsAssignedValue}>
+                        {selectedShipment.assigned_rider_id
+                          ? localRiderCandidates.find((candidate) => candidate.rider_id === selectedShipment.assigned_rider_id)?.rider_name || `Rider ${selectedShipment.assigned_rider_id}`
+                          : 'No local rider assigned yet'}
+                      </Text>
+                      <Text style={styles.pickupOpsAssignedMeta}>
+                        {selectedShipment.pickup_state || 'Unknown pickup'} {'->'} {selectedShipment.delivery_state || 'Unknown destination'}
+                      </Text>
+                    </View>
+
+                    <TextInput
+                      style={styles.overrideInput}
+                      placeholder="Assignment note, transfer reason, or release context..."
+                      placeholderTextColor="#9ca3af"
+                      value={localRiderOpsReason}
+                      onChangeText={setLocalRiderOpsReason}
+                      multiline
+                    />
+
+                    <View style={styles.pickupOpsActionRow}>
+                      <Pressable
+                        style={styles.pickupOpsSecondaryBtn}
+                        onPress={() => loadLocalRiderOpsContext(selectedShipment)}
+                        disabled={localRiderOpsLoading}
+                      >
+                        <Text style={styles.pickupOpsSecondaryText}>{localRiderOpsLoading ? 'Refreshing...' : 'Refresh Riders'}</Text>
+                      </Pressable>
+                      {selectedShipment.assigned_rider_id ? (
+                        <Pressable
+                          style={styles.pickupOpsReleaseBtn}
+                          onPress={() => handleUnassignLocalRider(selectedShipment)}
+                          disabled={localRiderOpsBusy === 'unassign-local'}
+                        >
+                          <Text style={styles.pickupOpsReleaseText}>{localRiderOpsBusy === 'unassign-local' ? 'Releasing...' : 'Unassign Rider'}</Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
+
+                    <Text style={styles.pickupOpsListTitle}>Available Riders</Text>
+                    {localRiderCandidates.length === 0 ? (
+                      <Text style={styles.timelineEmpty}>No available local riders match this shipment right now.</Text>
+                    ) : (
+                      <View style={styles.pickupCandidateList}>
+                        {localRiderCandidates.map((candidate) => {
+                          const isAssigned = selectedShipment.assigned_rider_id === candidate.rider_id;
+                          const isTransfer = !!selectedShipment.assigned_rider_id && !isAssigned;
+                          const actionKey = `assign-local:${candidate.rider_id}`;
+                          return (
+                            <View key={candidate.rider_id} style={styles.pickupCandidateCard}>
+                              <View style={{ flex: 1, gap: 4 }}>
+                                <Text style={styles.pickupCandidateTitle}>{candidate.rider_name}</Text>
+                                <Text style={styles.pickupCandidateMeta}>
+                                  {candidate.vehicle_id} • {candidate.vehicle_type} • Score {candidate.score}
+                                </Text>
+                                <Text style={styles.pickupCandidateMeta}>
+                                  {candidate.operating_state} • {candidate.operating_city} • {candidate.is_online ? 'online' : 'offline'}
+                                </Text>
+                                <Text style={styles.pickupCandidateMeta}>Phone: {candidate.rider_phone}</Text>
+                              </View>
+                              <Pressable
+                                style={[styles.pickupCandidateAction, isAssigned && styles.pickupCandidateActionAssigned]}
+                                onPress={() => handleAssignLocalRider(selectedShipment, candidate)}
+                                disabled={isAssigned || localRiderOpsBusy === actionKey}
+                              >
+                                <Text style={[styles.pickupCandidateActionText, isAssigned && styles.pickupCandidateActionTextAssigned]}>
+                                  {isAssigned ? 'Assigned' : localRiderOpsBusy === actionKey ? 'Working...' : isTransfer ? 'Transfer' : 'Assign'}
+                                </Text>
+                              </Pressable>
+                            </View>
+                          );
+                        })}
+                      </View>
+                    )}
+                  </View>
+                )}
 
                 {isManagedFinalMileShipment(selectedShipment) && (
                   <View style={styles.pickupOpsSection}>
@@ -1758,6 +2207,16 @@ const styles = StyleSheet.create({
   detailCard: { width: '48%', backgroundColor: '#F9FAFB', borderRadius: 14, padding: 16, borderWidth: 1, borderColor: '#F3F4F6' },
   detailLabel: { fontSize: 11, color: '#6b7280', fontWeight: '700', textTransform: 'uppercase', marginBottom: 6 },
   detailValue: { fontSize: 14, color: '#111827', fontWeight: '600', lineHeight: 20 },
+  opsControlSection: { backgroundColor: '#FFFBEB', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 16, padding: 18, marginBottom: 20, gap: 14 },
+  opsStatusBadge: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8 },
+  opsStatusBadgeText: { color: '#92400E', fontSize: 11, fontWeight: '800' },
+  opsStageGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  opsStageBtn: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#FDE68A', borderRadius: 12, paddingHorizontal: 13, paddingVertical: 10 },
+  opsStageBtnActive: { backgroundColor: BRAND.lime, borderColor: BRAND.lime },
+  opsStageBtnText: { color: '#92400E', fontSize: 12, fontWeight: '800' },
+  opsStageBtnTextActive: { color: '#002B22' },
+  opsCancelBtn: { alignSelf: 'flex-start', backgroundColor: '#DC2626', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10 },
+  opsCancelText: { color: '#fff', fontWeight: '800', fontSize: 12 },
   pickupOpsSection: { backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: '#E2E8F0', borderRadius: 16, padding: 18, marginBottom: 20, gap: 14 },
   pickupOpsHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 },
   pickupOpsTitle: { fontSize: 18, fontWeight: '800', color: '#111827' },

@@ -11,9 +11,15 @@ import {
   View,
 } from 'react-native';
 import { BRAND } from '../../constants/Theme';
-import { CheckCircle, Circle, MapPin, Search, Truck, Users, X } from 'lucide-react-native';
+import { CheckCircle, Circle, MapPin, Search, Trash2, Truck, UserPlus, Users, X } from 'lucide-react-native';
 import { supabase } from '../../supabase';
-import { fetchFleetRows, updateFleetVehicleStatus, updateStaffTerminalAssignment } from '../../utils/adminData';
+import {
+  enrollFleetStaff,
+  fetchFleetRows,
+  removeFleetStaffFromOps,
+  updateFleetVehicleStatus,
+  updateStaffTerminalAssignment,
+} from '../../utils/adminData';
 import { stageColor, stageLabel } from '../../utils/routingService';
 
 const formatDate = (dateStr: string) => {
@@ -26,6 +32,33 @@ const formatDate = (dateStr: string) => {
   });
 };
 
+const SERVICE_PROFILES = [
+  { key: 'final_mile', label: 'Final-Mile Rider' },
+  { key: 'first_mile', label: 'First-Mile Driver' },
+  { key: 'dual', label: 'Dual Ops' },
+];
+
+const VEHICLE_TYPES = ['bike', 'van', 'mini_truck', 'truck', 'cold_chain_van'];
+
+const emptyStaffForm = {
+  userId: '',
+  fullName: '',
+  phoneNumber: '',
+  role: 'rider',
+  serviceProfile: 'final_mile' as 'final_mile' | 'first_mile' | 'dual',
+  state: '',
+  city: '',
+  vehicleId: '',
+  vehicleCode: '',
+  vehicleType: 'bike',
+  plateNumber: '',
+  capacityKg: '',
+  capacityVolumeCm3: '',
+  maxParcelCount: '',
+  goodsCapabilities: 'documents, fragile, general',
+  assignedTerminalId: '',
+};
+
 export default function RidersDrivers() {
   const glass = Platform.OS === 'web' ? { backdropFilter: 'blur(16px)' } : {};
   const [riders, setRiders] = useState<any[]>([]);
@@ -35,6 +68,10 @@ export default function RidersDrivers() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [terminals, setTerminals] = useState<any[]>([]);
   const [terminalSearch, setTerminalSearch] = useState('');
+  const [showEnrollModal, setShowEnrollModal] = useState(false);
+  const [staffForm, setStaffForm] = useState(emptyStaffForm);
+  const [staffFormError, setStaffFormError] = useState('');
+  const [enrollTerminalSearch, setEnrollTerminalSearch] = useState('');
 
   const loadRiders = useCallback(async () => {
     setLoading(true);
@@ -98,19 +135,38 @@ export default function RidersDrivers() {
     );
   }, [terminalSearch, terminals]);
 
-  const handleSuspendToggle = async (rider: any) => {
-    const nextStatus = rider.status === 'Offline' ? 'available' : 'offline';
-    setBusyId(rider.riderId);
+  const filteredEnrollTerminals = useMemo(() => {
+    const query = enrollTerminalSearch.trim().toLowerCase();
+    if (!query) return terminals;
+    return terminals.filter((terminal) =>
+      terminal.name?.toLowerCase().includes(query)
+      || terminal.code?.toLowerCase().includes(query)
+      || terminal.city?.toLowerCase().includes(query)
+      || terminal.state?.toLowerCase().includes(query)
+    );
+  }, [enrollTerminalSearch, terminals]);
+
+  const refreshSelectedRider = async (riderId: string) => {
+    const next = (await fetchFleetRows()).find((row: any) => row.riderId === riderId);
+    if (next) setSelectedRider(next);
+  };
+
+  const handleSetAvailability = async (rider: any, nextStatus: string) => {
+    setBusyId(`${nextStatus}:${rider.riderId}`);
     try {
       await updateFleetVehicleStatus(rider.riderId, nextStatus);
       await loadRiders();
       if (selectedRider?.riderId === rider.riderId) {
-        const next = (await fetchFleetRows()).find((row: any) => row.riderId === rider.riderId);
-        if (next) setSelectedRider(next);
+        await refreshSelectedRider(rider.riderId);
       }
     } finally {
       setBusyId(null);
     }
+  };
+
+  const handleSuspendToggle = async (rider: any) => {
+    const nextStatus = rider.status === 'Offline' ? 'available' : 'offline';
+    await handleSetAvailability(rider, nextStatus);
   };
 
   const handleAssignTerminal = async (rider: any, terminalId: string) => {
@@ -125,6 +181,36 @@ export default function RidersDrivers() {
     }
   };
 
+  const handleEnrollStaff = async () => {
+    setStaffFormError('');
+    setBusyId('enroll-staff');
+    try {
+      await enrollFleetStaff({
+        ...staffForm,
+        assignedTerminalId: staffForm.assignedTerminalId || null,
+      });
+      setStaffForm(emptyStaffForm);
+      setEnrollTerminalSearch('');
+      setShowEnrollModal(false);
+      await loadRiders();
+    } catch (error: any) {
+      setStaffFormError(error?.message || 'Could not enroll staff member.');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleRemoveFromOps = async (rider: any) => {
+    setBusyId(`remove:${rider.riderId}`);
+    try {
+      await removeFleetStaffFromOps(rider.riderId);
+      setSelectedRider(null);
+      await loadRiders();
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   return (
     <View style={styles.container}>
       <View style={styles.headerRow}>
@@ -132,9 +218,15 @@ export default function RidersDrivers() {
           <Text style={styles.pageTitle}>Riders & Drivers</Text>
           <Text style={styles.pageSub}>Live roster of riders, their current availability, locations, active assignments, and ops-owned terminal hub assignment.</Text>
         </View>
-        <Pressable style={styles.refreshBtn} onPress={loadRiders}>
-          <Text style={styles.refreshBtnText}>Refresh Riders</Text>
-        </Pressable>
+        <View style={styles.headerActions}>
+          <Pressable style={styles.enrollBtn} onPress={() => setShowEnrollModal(true)}>
+            <UserPlus size={16} color="#002B22" />
+            <Text style={styles.enrollBtnText}>Enroll Staff</Text>
+          </Pressable>
+          <Pressable style={styles.refreshBtn} onPress={loadRiders}>
+            <Text style={styles.refreshBtnText}>Refresh Riders</Text>
+          </Pressable>
+        </View>
       </View>
 
       <View style={styles.statsContainer}>
@@ -219,9 +311,9 @@ export default function RidersDrivers() {
                       <Pressable style={styles.actionBtnGray} onPress={() => setSelectedRider(rider)}>
                         <Text style={styles.actionBtnTextGray}>View Profile</Text>
                       </Pressable>
-                      <Pressable style={styles.actionBtnGray} onPress={() => handleSuspendToggle(rider)} disabled={busyId === rider.riderId}>
+                      <Pressable style={styles.actionBtnGray} onPress={() => handleSuspendToggle(rider)} disabled={!!busyId?.endsWith(`:${rider.riderId}`)}>
                         <Text style={styles.actionBtnTextGray}>
-                          {busyId === rider.riderId ? 'Working...' : rider.status === 'Offline' ? 'Activate' : 'Suspend'}
+                          {busyId?.endsWith(`:${rider.riderId}`) ? 'Working...' : rider.status === 'Offline' ? 'Activate' : 'Suspend'}
                         </Text>
                       </Pressable>
                     </View>
@@ -232,6 +324,136 @@ export default function RidersDrivers() {
           </ScrollView>
         )}
       </View>
+
+      <Modal visible={showEnrollModal} transparent animationType="fade" onRequestClose={() => setShowEnrollModal(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.enrollModalCard}>
+            <View style={styles.modalHeader}>
+              <View>
+                <Text style={styles.modalTitle}>Enroll Rider / Driver</Text>
+                <Text style={styles.modalSub}>Attach an existing app user to operations and register their vehicle.</Text>
+              </View>
+              <Pressable style={styles.closeBtn} onPress={() => setShowEnrollModal(false)}>
+                <X size={18} color="#111827" />
+              </Pressable>
+            </View>
+
+            <ScrollView showsVerticalScrollIndicator={false}>
+              {staffFormError ? <Text style={styles.formError}>{staffFormError}</Text> : null}
+
+              <Text style={styles.sectionTitle}>Service Profile</Text>
+              <View style={styles.chipRow}>
+                {SERVICE_PROFILES.map((profile) => {
+                  const active = staffForm.serviceProfile === profile.key;
+                  return (
+                    <Pressable
+                      key={profile.key}
+                      style={[styles.formChip, active && styles.formChipActive]}
+                      onPress={() => setStaffForm((current) => ({
+                        ...current,
+                        serviceProfile: profile.key as any,
+                        role: profile.key === 'final_mile' ? 'rider' : 'driver',
+                        vehicleType: profile.key === 'final_mile' ? 'bike' : current.vehicleType === 'bike' ? 'van' : current.vehicleType,
+                      }))}
+                    >
+                      <Text style={[styles.formChipText, active && styles.formChipTextActive]}>{profile.label}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <View style={styles.formGrid}>
+                {[
+                  ['Existing User UUID', 'userId', '00000000-0000-0000-0000-000000000000'],
+                  ['Full Name', 'fullName', 'Adewale Driver'],
+                  ['Phone Number', 'phoneNumber', '+234...'],
+                  ['State', 'state', 'Lagos'],
+                  ['City', 'city', 'Ikeja'],
+                  ['Vehicle Code', 'vehicleCode', 'LOS-VAN-01'],
+                  ['Vehicle ID', 'vehicleId', 'LOS-VAN-01'],
+                  ['Plate Number', 'plateNumber', 'ABC-123XY'],
+                  ['Capacity KG', 'capacityKg', '250'],
+                  ['Volume CM3', 'capacityVolumeCm3', '800000'],
+                  ['Max Parcels', 'maxParcelCount', '8'],
+                  ['Goods Capabilities', 'goodsCapabilities', 'documents, fragile, general'],
+                ].map(([label, key, placeholder]) => (
+                  <View key={key} style={styles.formField}>
+                    <Text style={styles.fieldLabel}>{label}</Text>
+                    <TextInput
+                      value={(staffForm as any)[key]}
+                      onChangeText={(value) => setStaffForm((current) => ({ ...current, [key]: value }))}
+                      style={styles.formInput}
+                      placeholder={placeholder}
+                      placeholderTextColor="#9CA3AF"
+                    />
+                  </View>
+                ))}
+              </View>
+
+              <Text style={styles.sectionTitle}>Vehicle Type</Text>
+              <View style={styles.chipRow}>
+                {VEHICLE_TYPES.map((type) => {
+                  const active = staffForm.vehicleType === type;
+                  return (
+                    <Pressable
+                      key={type}
+                      style={[styles.formChip, active && styles.formChipActive]}
+                      onPress={() => setStaffForm((current) => ({ ...current, vehicleType: type }))}
+                    >
+                      <Text style={[styles.formChipText, active && styles.formChipTextActive]}>{type.replace(/_/g, ' ')}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <Text style={styles.sectionTitle}>Home Terminal</Text>
+              <View style={styles.searchBox}>
+                <Search size={16} color="#6B7280" />
+                <TextInput
+                  value={enrollTerminalSearch}
+                  onChangeText={setEnrollTerminalSearch}
+                  style={styles.searchInput}
+                  placeholder="Search terminal by code, city, or state..."
+                  placeholderTextColor="#9CA3AF"
+                />
+              </View>
+              <View style={styles.terminalAssignList}>
+                {filteredEnrollTerminals.slice(0, 8).map((terminal) => {
+                  const active = staffForm.assignedTerminalId === terminal.id;
+                  return (
+                    <View key={terminal.id} style={styles.terminalAssignCard}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.terminalAssignTitle}>{terminal.name}</Text>
+                        <Text style={styles.terminalAssignMeta}>{terminal.code} • {terminal.city}, {terminal.state}</Text>
+                      </View>
+                      <Pressable
+                        style={[styles.assignBtn, active && styles.assignBtnActive]}
+                        onPress={() => setStaffForm((current) => ({
+                          ...current,
+                          assignedTerminalId: terminal.id,
+                          state: current.state || terminal.state || '',
+                          city: current.city || terminal.city || '',
+                        }))}
+                      >
+                        <Text style={[styles.assignBtnText, active && styles.assignBtnTextActive]}>{active ? 'Selected' : 'Select'}</Text>
+                      </Pressable>
+                    </View>
+                  );
+                })}
+              </View>
+
+              <View style={styles.modalActions}>
+                <Pressable style={styles.enrollSubmitBtn} onPress={handleEnrollStaff} disabled={busyId === 'enroll-staff'}>
+                  <Text style={styles.enrollSubmitText}>{busyId === 'enroll-staff' ? 'Saving...' : 'Enroll Staff'}</Text>
+                </Pressable>
+                <Pressable style={styles.actionBtnGrayLarge} onPress={() => setShowEnrollModal(false)}>
+                  <Text style={styles.actionBtnTextGray}>Cancel</Text>
+                </Pressable>
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       <Modal visible={!!selectedRider} transparent animationType="fade" onRequestClose={() => setSelectedRider(null)}>
         <View style={styles.modalOverlay}>
@@ -330,9 +552,41 @@ export default function RidersDrivers() {
                 </View>
 
                 <View style={styles.modalActions}>
-                  <Pressable style={styles.actionBtnGrayLarge} onPress={() => handleSuspendToggle(selectedRider)} disabled={busyId === selectedRider.riderId}>
+                  <Pressable
+                    style={styles.actionBtnGrayLarge}
+                    onPress={() => handleSetAvailability(selectedRider, 'available')}
+                    disabled={busyId === `available:${selectedRider.riderId}`}
+                  >
                     <Text style={styles.actionBtnTextGray}>
-                      {busyId === selectedRider.riderId ? 'Working...' : selectedRider.status === 'Offline' ? 'Reactivate Rider' : 'Suspend Rider'}
+                      {busyId === `available:${selectedRider.riderId}` ? 'Saving...' : 'Set Available'}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.actionBtnGrayLarge}
+                    onPress={() => handleSetAvailability(selectedRider, 'offline')}
+                    disabled={busyId === `offline:${selectedRider.riderId}`}
+                  >
+                    <Text style={styles.actionBtnTextGray}>
+                      {busyId === `offline:${selectedRider.riderId}` ? 'Saving...' : 'Set Offline'}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.actionBtnGrayLarge}
+                    onPress={() => handleSetAvailability(selectedRider, 'maintenance')}
+                    disabled={busyId === `maintenance:${selectedRider.riderId}`}
+                  >
+                    <Text style={styles.actionBtnTextGray}>
+                      {busyId === `maintenance:${selectedRider.riderId}` ? 'Saving...' : 'Set Maintenance'}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.actionBtnDangerLarge}
+                    onPress={() => handleRemoveFromOps(selectedRider)}
+                    disabled={busyId === `remove:${selectedRider.riderId}`}
+                  >
+                    <Trash2 size={15} color="#991B1B" />
+                    <Text style={styles.actionBtnDangerText}>
+                      {busyId === `remove:${selectedRider.riderId}` ? 'Removing...' : 'Remove From Ops'}
                     </Text>
                   </Pressable>
                 </View>
@@ -357,6 +611,22 @@ const styles = StyleSheet.create({
   },
   pageTitle: { fontSize: 28, fontWeight: '800', color: '#1a1a1a', marginBottom: 6 },
   pageSub: { fontSize: 15, color: '#4b5563', maxWidth: 760 },
+  headerActions: {
+    flexDirection: 'row',
+    gap: 10,
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
+  },
+  enrollBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: BRAND.lime,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 10,
+  },
+  enrollBtnText: { color: '#002B22', fontWeight: '800', fontSize: 14 },
   refreshBtn: {
     backgroundColor: BRAND.lime,
     paddingHorizontal: 20,
@@ -499,6 +769,14 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     padding: 24,
   },
+  enrollModalCard: {
+    width: '100%',
+    maxWidth: 980,
+    maxHeight: '90%',
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 24,
+  },
   modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -557,6 +835,71 @@ const styles = StyleSheet.create({
     color: '#111827',
     marginBottom: 14,
   },
+  formError: {
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    borderRadius: 12,
+    padding: 12,
+    color: '#991B1B',
+    fontWeight: '700',
+    marginBottom: 16,
+  },
+  formGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 14,
+    marginBottom: 18,
+  },
+  formField: {
+    width: '48%',
+    minWidth: 260,
+  },
+  fieldLabel: {
+    fontSize: 11,
+    color: '#64748B',
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    marginBottom: 7,
+  },
+  formInput: {
+    backgroundColor: '#F9FAFB',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    color: '#111827',
+    fontSize: 14,
+    outlineStyle: 'none' as any,
+  },
+  chipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginBottom: 18,
+  },
+  formChip: {
+    backgroundColor: '#F9FAFB',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  formChipActive: {
+    backgroundColor: BRAND.lime,
+    borderColor: BRAND.lime,
+  },
+  formChipText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#475569',
+    textTransform: 'capitalize',
+  },
+  formChipTextActive: {
+    color: '#002B22',
+  },
   sectionSub: {
     fontSize: 13,
     color: '#6B7280',
@@ -607,6 +950,9 @@ const styles = StyleSheet.create({
   },
   modalActions: {
     marginTop: 18,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
   },
   terminalAssignList: {
     gap: 10,
@@ -655,5 +1001,34 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderRadius: 10,
+  },
+  actionBtnDangerLarge: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#FEE2E2',
+    borderWidth: 1,
+    borderColor: '#FCA5A5',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 10,
+  },
+  actionBtnDangerText: {
+    color: '#991B1B',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  enrollSubmitBtn: {
+    alignSelf: 'flex-start',
+    backgroundColor: BRAND.green,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 10,
+  },
+  enrollSubmitText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '800',
   },
 });
