@@ -647,6 +647,73 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
     }
   };
 
+  const handleCreatePickupRequest = async (shipment: any) => {
+    const reason = pickupOpsReason.trim() || 'Ops created/recovered the first-mile pickup queue record.';
+
+    setPickupOpsBusy('create-pickup-request');
+    try {
+      const { error } = await supabase.rpc('create_first_mile_pickup_request', {
+        p_payload: {
+          shipment_id: shipment.id,
+          priority: 'normal',
+        },
+      });
+      if (error) throw error;
+
+      await logShipmentEvent(
+        shipment.id,
+        shipment.dispatch_stage || 'awaiting_source_terminal',
+        terminalMap[shipment.source_terminal_id]?.name || shipment.pickup_state,
+        undefined,
+        'admin',
+        reason
+      );
+
+      setPickupOpsReason('');
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setPickupOpsBusy(null);
+    }
+  };
+
+  const handleOfferNextPickupAgent = async (shipment: any, force = false) => {
+    if (!pickupQueueRecord?.id) return;
+
+    const actionKey = force ? 'force-next-offer' : 'offer-next';
+    const reason = pickupOpsReason.trim() || (
+      force
+        ? 'Ops forced the next eligible pickup vehicle offer.'
+        : 'Ops offered this pickup request to the next eligible vehicle.'
+    );
+
+    setPickupOpsBusy(actionKey);
+    try {
+      const { error } = await supabase.rpc('offer_next_first_mile_pickup_candidate', {
+        p_pickup_request_id: pickupQueueRecord.id,
+        p_force: force,
+        p_reason: reason,
+      });
+      if (error) throw error;
+
+      setPickupOpsReason('');
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setPickupOpsBusy(null);
+    }
+  };
+
+  const handleRunPickupDispatchHeartbeat = async (shipment: any) => {
+    setPickupOpsBusy('dispatch-heartbeat');
+    try {
+      const { error } = await supabase.rpc('process_first_mile_dispatch_backlog', { p_limit: 100 });
+      if (error) throw error;
+
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setPickupOpsBusy(null);
+    }
+  };
+
   const handleAssignPickupAgent = async (shipment: any, candidate: any) => {
     if (!pickupQueueRecord?.id) return;
 
@@ -1270,6 +1337,48 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
                           multiline
                         />
 
+                        <View style={styles.pickupOpsActionRow}>
+                          <Pressable
+                            style={styles.pickupOpsPrimaryBtn}
+                            onPress={() => handleOfferNextPickupAgent(selectedShipment, false)}
+                            disabled={!!pickupQueueRecord.assigned_agent_id || pickupOpsBusy === 'offer-next'}
+                          >
+                            <Text style={styles.pickupOpsPrimaryText}>
+                              {pickupOpsBusy === 'offer-next' ? 'Offering...' : 'Offer Next Vehicle'}
+                            </Text>
+                          </Pressable>
+
+                          <Pressable
+                            style={styles.pickupOpsSecondaryBtn}
+                            onPress={() => handleOfferNextPickupAgent(selectedShipment, true)}
+                            disabled={!!pickupQueueRecord.assigned_agent_id || pickupOpsBusy === 'force-next-offer'}
+                          >
+                            <Text style={styles.pickupOpsSecondaryText}>
+                              {pickupOpsBusy === 'force-next-offer' ? 'Restarting...' : 'Force Restart Ladder'}
+                            </Text>
+                          </Pressable>
+
+                          <Pressable
+                            style={styles.pickupOpsSecondaryBtn}
+                            onPress={() => loadPickupOpsContext(selectedShipment)}
+                            disabled={pickupOpsLoading}
+                          >
+                            <Text style={styles.pickupOpsSecondaryText}>
+                              {pickupOpsLoading ? 'Refreshing...' : 'Refresh Vehicles'}
+                            </Text>
+                          </Pressable>
+
+                          <Pressable
+                            style={styles.pickupOpsSecondaryBtn}
+                            onPress={() => handleRunPickupDispatchHeartbeat(selectedShipment)}
+                            disabled={pickupOpsBusy === 'dispatch-heartbeat'}
+                          >
+                            <Text style={styles.pickupOpsSecondaryText}>
+                              {pickupOpsBusy === 'dispatch-heartbeat' ? 'Running...' : 'Run Dispatch Heartbeat'}
+                            </Text>
+                          </Pressable>
+                        </View>
+
                         {pickupQueueRecord.assigned_agent_id ? (
                           <View style={styles.pickupOpsActionRow}>
                             <Pressable
@@ -1317,7 +1426,7 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
                                     disabled={isAssigned || pickupOpsBusy === actionKey}
                                   >
                                     <Text style={[styles.pickupCandidateActionText, isAssigned && styles.pickupCandidateActionTextAssigned]}>
-                                      {isAssigned ? 'Assigned' : pickupOpsBusy === actionKey ? 'Working...' : isTransfer ? 'Transfer' : 'Assign'}
+                                      {isAssigned ? 'Assigned' : pickupOpsBusy === actionKey ? 'Working...' : isTransfer ? 'Transfer Vehicle' : 'Assign Vehicle'}
                                     </Text>
                                   </Pressable>
                                 </View>
@@ -1347,7 +1456,18 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
                         )}
                       </>
                     ) : (
-                      <Text style={styles.timelineEmpty}>This managed pickup shipment does not have a queue record yet.</Text>
+                      <View style={styles.pickupOpsEmptyCard}>
+                        <Text style={styles.timelineEmpty}>This managed pickup shipment does not have a queue record yet.</Text>
+                        <Pressable
+                          style={styles.pickupOpsPrimaryBtn}
+                          onPress={() => handleCreatePickupRequest(selectedShipment)}
+                          disabled={pickupOpsBusy === 'create-pickup-request'}
+                        >
+                          <Text style={styles.pickupOpsPrimaryText}>
+                            {pickupOpsBusy === 'create-pickup-request' ? 'Creating...' : 'Create Pickup Queue'}
+                          </Text>
+                        </Pressable>
+                      </View>
                     )}
                   </View>
                 )}
@@ -1651,9 +1771,14 @@ const styles = StyleSheet.create({
   pickupOpsAssignedValue: { fontSize: 15, color: '#111827', fontWeight: '700' },
   pickupOpsAssignedMeta: { fontSize: 12, color: '#64748B' },
   pickupOpsActionRow: { flexDirection: 'row', gap: 10, flexWrap: 'wrap' },
+  pickupOpsPrimaryBtn: { alignSelf: 'flex-start', backgroundColor: BRAND.green, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10 },
+  pickupOpsPrimaryText: { color: '#fff', fontWeight: '800', fontSize: 12 },
+  pickupOpsSecondaryBtn: { alignSelf: 'flex-start', backgroundColor: '#fff', borderWidth: 1, borderColor: BRAND.green, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10 },
+  pickupOpsSecondaryText: { color: BRAND.green, fontWeight: '800', fontSize: 12 },
   pickupOpsReleaseBtn: { alignSelf: 'flex-start', backgroundColor: '#FFF1F2', borderWidth: 1, borderColor: '#FDA4AF', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 10 },
   pickupOpsReleaseText: { color: '#BE123C', fontWeight: '800', fontSize: 12 },
   pickupOpsListTitle: { fontSize: 15, fontWeight: '800', color: '#111827' },
+  pickupOpsEmptyCard: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 12, padding: 14, gap: 12, alignItems: 'flex-start' },
   pickupCandidateList: { gap: 10 },
   pickupCandidateCard: { flexDirection: 'row', gap: 12, alignItems: 'center', backgroundColor: '#fff', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 14, padding: 14 },
   pickupCandidateTitle: { fontSize: 14, color: '#111827', fontWeight: '700' },
