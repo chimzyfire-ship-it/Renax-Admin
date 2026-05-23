@@ -52,6 +52,15 @@ const formatDate = (dateStr: string) =>
 const getShipmentStageLabel = (shipment: any) => {
   if (
     shipment?.routing_mode === 'relay_terminal'
+    && shipment?.relay_first_mile_strategy === 'renax_pickup'
+    && shipment?.dispatch_stage === 'awaiting_rider_acceptance'
+    && shipment?.first_mile_pickup_agent_id
+  ) {
+    return 'First-Mile Vehicle Assigned';
+  }
+
+  if (
+    shipment?.routing_mode === 'relay_terminal'
     && shipment?.relay_last_mile_strategy === 'recipient_pickup'
     && shipment?.dispatch_stage === 'received_at_destination_terminal'
   ) {
@@ -67,7 +76,7 @@ const getAdvanceLabel = (shipment: any) => {
   const isManagedFirstMile =
     routing === 'relay_terminal' &&
     shipment?.relay_first_mile_strategy === 'renax_pickup' &&
-    stage === 'awaiting_source_terminal' &&
+    ['awaiting_rider_acceptance', 'awaiting_source_terminal'].includes(stage) &&
     !shipment?.first_mile_pickup_agent_id;
 
   if (isManagedFirstMile) {
@@ -84,7 +93,7 @@ const getAdvanceLabel = (shipment: any) => {
 
   const labels: Record<string, string> = {
     pending_routing: 'Release To Queue',
-    awaiting_rider_acceptance: routing === 'relay_terminal' ? 'Assign First Mile' : 'Release Delivery',
+    awaiting_rider_acceptance: routing === 'relay_terminal' ? 'Manage Pickup' : 'Release Delivery',
     awaiting_source_terminal_dropoff: 'Receive Customer Drop-Off',
     awaiting_source_terminal: 'Check In Source Hub',
     received_at_source_terminal: 'Dispatch Linehaul',
@@ -553,7 +562,11 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
   };
 
   const handleAdvance = async (shipment: any, reason?: string) => {
-    if (isManagedFirstMileShipment(shipment) && shipment.dispatch_stage === 'awaiting_source_terminal' && !shipment.first_mile_pickup_agent_id) {
+    if (
+      isManagedFirstMileShipment(shipment)
+      && ['awaiting_rider_acceptance', 'awaiting_source_terminal'].includes(shipment.dispatch_stage || '')
+      && !shipment.first_mile_pickup_agent_id
+    ) {
       await loadShipmentDetails(shipment);
       return;
     }
