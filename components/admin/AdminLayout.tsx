@@ -19,6 +19,7 @@ import {
   LayoutDashboard,
   Settings,
   Bell,
+  Car,
   ChevronLeft,
   ChevronRight,
   Truck,
@@ -41,21 +42,23 @@ type AdminLayoutProps = {
   currentMenu?: string;
   onMenuChange?: (menu: string) => void;
   onLogout?: () => void;
+  adminContext?: any;
 };
 
 /* ─── Nav Config ──────────────────────────────────────────── */
 const SIDEBAR_MENUS = [
-  { key: 'dashboard',       label: 'Dashboard',          icon: LayoutDashboard },
-  { key: 'shipments',       label: 'Shipments',          icon: Truck },
-  { key: 'track_shipments', label: 'Track Shipments',    icon: MapPin },
-  { key: 'terminals',       label: 'Terminals',          icon: List },
-  { key: 'riders',          label: 'Riders & Drivers',   icon: Users },
-  { key: 'agro',            label: 'Agro Transport',     icon: Sprout },
-  { key: 'customers',       label: 'Customers',          icon: User },
-  { key: 'notif_queue',     label: 'Notification Queue', icon: MailWarning },
-  { key: 'analytics',       label: 'Analytics & Reports',icon: BarChart2 },
-  { key: 'earnings',        label: 'Earnings & Finance', icon: CircleDollarSign },
-  { key: 'settings',        label: 'Settings',           icon: Settings },
+  { key: 'dashboard',       label: 'Dashboard',          icon: LayoutDashboard, permissions: ['shipment.view_all', 'shipment.view_terminal'] },
+  { key: 'shipments',       label: 'Shipments',          icon: Truck, permissions: ['shipment.view_all', 'shipment.view_terminal'] },
+  { key: 'track_shipments', label: 'Track Shipments',    icon: MapPin, permissions: ['shipment.view_all', 'shipment.view_terminal'] },
+  { key: 'terminals',       label: 'Terminals',          icon: List, permissions: ['terminal.all', 'terminal.manage_own', 'shipment.view_terminal'] },
+  { key: 'riders',          label: 'Riders & Drivers',   icon: Users, permissions: ['fleet.view_all', 'fleet.view_terminal'] },
+  { key: 'deliver_earn',    label: 'Deliver & Earn',     icon: Car, permissions: ['deliver_earn.view_all', 'deliver_earn.review_applications'] },
+  { key: 'agro',            label: 'Agro Transport',     icon: Sprout, permissions: ['shipment.view_all', 'shipment.view_terminal'] },
+  { key: 'customers',       label: 'Customers',          icon: User, permissions: ['profile.view_all', 'profile.view_terminal'] },
+  { key: 'notif_queue',     label: 'Notification Queue', icon: MailWarning, permissions: ['ops_alert.manage', 'ops_alert.manage_terminal'] },
+  { key: 'analytics',       label: 'Analytics & Reports',icon: BarChart2, permissions: ['shipment.view_all'] },
+  { key: 'earnings',        label: 'Earnings & Finance', icon: CircleDollarSign, permissions: ['shipment.manage_all'] },
+  { key: 'settings',        label: 'Settings',           icon: Settings, permissions: ['*'] },
 ];
 
 
@@ -168,7 +171,16 @@ function useProfileWatcher() {
 }
 
 /* ─── Main Component ──────────────────────────────────────── */
-export default function AdminLayout({ children, currentMenu = 'dashboard', onMenuChange, onLogout }: AdminLayoutProps) {
+const hasMenuPermission = (adminContext: any, permissions: string[] = []) => {
+  if (!adminContext) return true;
+  const userPermissions = Array.isArray(adminContext?.permissions) ? adminContext.permissions : [];
+  if (adminContext.bootstrap_mode || userPermissions.includes('*')) return true;
+  if (!permissions.length) return true;
+  if (!userPermissions.length) return false;
+  return permissions.some((permission) => userPermissions.includes(permission));
+};
+
+export default function AdminLayout({ children, currentMenu = 'dashboard', onMenuChange, onLogout, adminContext }: AdminLayoutProps) {
   const { width } = useWindowDimensions();
   const isMobile = width < 1024;
 
@@ -234,6 +246,7 @@ export default function AdminLayout({ children, currentMenu = 'dashboard', onMen
 
   /* ── Notification actions ───────────────────────────────── */
   const unreadCount = notifications.filter((n) => !n.is_read).length;
+  const visibleMenus = SIDEBAR_MENUS.filter((menu) => hasMenuPermission(adminContext, menu.permissions));
 
   const handleMarkRead = useCallback(async (id: string) => {
     setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, is_read: true } : n)));
@@ -248,7 +261,7 @@ export default function AdminLayout({ children, currentMenu = 'dashboard', onMen
   /* ── Sidebar renderer ────────────────────────────────────── */
   const SidebarMenuItems = ({ onPress }: { onPress?: () => void }) => (
     <>
-      {SIDEBAR_MENUS.map((menu) => {
+      {visibleMenus.map((menu) => {
         const Icon = menu.icon;
         const isActive = currentMenu === menu.key;
         return (

@@ -5,6 +5,7 @@ import AdminLayout from '../components/admin/AdminLayout';
 import AdminDashboard from '../components/admin/AdminDashboard';
 import TrackShipments from '../components/admin/TrackShipments';
 import RidersDrivers from '../components/admin/RidersDrivers';
+import DeliverAndEarn from '../components/admin/DeliverAndEarn';
 import AgroTransport from '../components/admin/AgroTransport';
 import Customers from '../components/admin/Customers';
 import AnalyticsReports from '../components/admin/AnalyticsReports';
@@ -71,6 +72,7 @@ export default function AdminScreen() {
   const [session, setSession] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [hasAdminClaim, setHasAdminClaim] = useState(false);
+  const [adminContext, setAdminContext] = useState<any>(null);
   const [currentMenu, setCurrentMenu] = useState<string>('dashboard');
   const [shipmentFocus, setShipmentFocus] = useState<{
     shipmentId?: string;
@@ -80,17 +82,26 @@ export default function AdminScreen() {
   }>({ version: 0 });
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session: nextSession } }) => {
+    const loadAdminContext = async () => {
+      const { data, error } = await supabase.rpc('current_admin_context');
+      setAdminContext(error ? null : data);
+    };
+
+    supabase.auth.getSession().then(async ({ data: { session: nextSession } }) => {
       setSession(nextSession);
       setHasAdminClaim(resolveClaimRole(nextSession?.user) === 'admin');
+      if (nextSession) await loadAdminContext();
+      else setAdminContext(null);
       setLoading(false);
     });
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    } = supabase.auth.onAuthStateChange(async (_event, nextSession) => {
       setSession(nextSession);
       setHasAdminClaim(resolveClaimRole(nextSession?.user) === 'admin');
+      if (nextSession) await loadAdminContext();
+      else setAdminContext(null);
       setLoading(false);
     });
 
@@ -124,6 +135,8 @@ export default function AdminScreen() {
         return <Terminals />;
       case 'riders':
         return <RidersDrivers />;
+      case 'deliver_earn':
+        return <DeliverAndEarn />;
       case 'agro':
         return <AgroTransport />;
       case 'customers':
@@ -164,6 +177,7 @@ export default function AdminScreen() {
       currentMenu={currentMenu}
       onMenuChange={(menu: string) => setCurrentMenu(menu)}
       onLogout={() => supabase.auth.signOut()}
+      adminContext={adminContext}
     >
       {renderContent()}
     </AdminLayout>

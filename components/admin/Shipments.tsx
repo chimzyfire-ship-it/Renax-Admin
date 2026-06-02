@@ -17,7 +17,6 @@ import {
   advanceShipmentStage,
   logShipmentEvent,
   resolveRouting,
-  shipmentStatusFromStage,
   shipmentStatusLabel,
   stageColor,
   stageLabel,
@@ -171,6 +170,11 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
   const [localRiderOpsLoading, setLocalRiderOpsLoading] = useState(false);
   const [localRiderOpsBusy, setLocalRiderOpsBusy] = useState<string | null>(null);
   const [localRiderOpsReason, setLocalRiderOpsReason] = useState('');
+  const [deliverEarnCandidates, setDeliverEarnCandidates] = useState<any[]>([]);
+  const [deliverEarnOffers, setDeliverEarnOffers] = useState<any[]>([]);
+  const [deliverEarnOpsLoading, setDeliverEarnOpsLoading] = useState(false);
+  const [deliverEarnOpsBusy, setDeliverEarnOpsBusy] = useState<string | null>(null);
+  const [deliverEarnOpsReason, setDeliverEarnOpsReason] = useState('');
 
   const terminalMap = useMemo(
     () => Object.fromEntries(terminals.map((terminal) => [terminal.id, terminal])),
@@ -258,7 +262,21 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
     shipment?.routing_mode === 'relay_terminal' && shipment?.relay_last_mile_strategy === 'renax_delivery';
 
   const isLocalRiderManagedShipment = (shipment: any) =>
-    shipment?.routing_mode !== 'relay_terminal' || !!shipment?.assigned_rider_id;
+    shipment?.supply_mode !== 'deliver_and_earn' && (shipment?.routing_mode !== 'relay_terminal' || !!shipment?.assigned_rider_id);
+
+  const isDeliverEarnCompatibleShipment = (shipment: any) => {
+    const pickupState = String(shipment?.pickup_state || '').trim().toLowerCase();
+    const deliveryState = String(shipment?.delivery_state || '').trim().toLowerCase();
+    const sameState = !!pickupState && pickupState === deliveryState;
+    return shipment?.supply_mode === 'deliver_and_earn'
+      || (
+        shipment?.routing_mode !== 'relay_terminal'
+        && sameState
+        && !shipment?.assigned_rider_id
+        && !shipment?.final_mile_rider_id
+        && ['pending_routing', 'awaiting_rider_acceptance'].includes(shipment?.dispatch_stage || 'pending_routing')
+      );
+  };
 
   const locationNameForStage = (shipment: any, stage: string) => {
     if (stage === 'received_at_source_terminal' || stage === 'linehaul_in_transit') {
@@ -434,6 +452,38 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
     }
   }, []);
 
+  const loadDeliverEarnOpsContext = useCallback(async (shipment: any) => {
+    if (!isDeliverEarnCompatibleShipment(shipment)) {
+      setDeliverEarnCandidates([]);
+      setDeliverEarnOffers([]);
+      return;
+    }
+
+    setDeliverEarnOpsLoading(true);
+    try {
+      const [{ data: candidates, error: candidatesError }, { data: offers, error: offersError }] = await Promise.all([
+        supabase.rpc('deliver_and_earn_candidates', { p_shipment_id: shipment.id }),
+        supabase
+          .from('deliver_and_earn_job_offers')
+          .select('*')
+          .eq('shipment_id', shipment.id)
+          .order('created_at', { ascending: false }),
+      ]);
+
+      if (candidatesError) {
+        console.warn('Deliver & Earn candidates unavailable for this shipment.', candidatesError);
+      }
+      if (offersError) {
+        console.warn('Deliver & Earn offers unavailable for this shipment.', offersError);
+      }
+
+      setDeliverEarnCandidates((candidates || []).slice(0, 10));
+      setDeliverEarnOffers(offers || []);
+    } finally {
+      setDeliverEarnOpsLoading(false);
+    }
+  }, []);
+
   const loadShipmentDetails = async (shipment: any) => {
     setSelectedShipment(shipment);
     const [{ data: eventData }, { data: suggestionData }, { data: proofData }] = await Promise.all([
@@ -458,6 +508,7 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
     setPickupOpsReason('');
     setFinalMileOpsReason('');
     setLocalRiderOpsReason('');
+    setDeliverEarnOpsReason('');
     setShowOverrideInput(false);
     setShowExceptionMenu(false);
     setShowHubScan(false);
@@ -465,6 +516,7 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
       loadPickupOpsContext(shipment),
       loadFinalMileOpsContext(shipment),
       loadLocalRiderOpsContext(shipment),
+      loadDeliverEarnOpsContext(shipment),
     ]);
   };
 
@@ -647,31 +699,24 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
       });
       const shipmentType = routing.routing_mode === 'relay_terminal' ? 'inter_state' : 'intra_state';
 
-      await supabase
-        .from('shipments')
-        .update({
+      const { error } = await supabase.rpc('admin_reroute_shipment', {
+        p_payload: {
+          shipment_id: shipment.id,
           routing_mode: routing.routing_mode,
           dispatch_stage: routing.dispatch_stage,
-          status: shipmentStatusFromStage(routing.dispatch_stage, routing.routing_mode),
           pickup_state: routing.pickup_state,
           pickup_city: routing.pickup_city,
           delivery_state: routing.delivery_state,
           delivery_city: routing.delivery_city,
           source_terminal_id: routing.source_terminal_id,
           destination_terminal_id: routing.destination_terminal_id,
+          relay_first_mile_strategy: shipment.relay_first_mile_strategy || 'customer_dropoff',
+          relay_last_mile_strategy: shipment.relay_last_mile_strategy || 'renax_delivery',
           shipment_type: shipmentType,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', shipment.id);
-
-      await logShipmentEvent(
-        shipment.id,
-        routing.dispatch_stage,
-        routing.source_terminal_id ? terminalMap[routing.source_terminal_id]?.name : routing.pickup_state,
-        undefined,
-        'admin',
-        `Admin rerouted shipment. ${routing.reason}`
-      );
+          reason: `Admin rerouted shipment. ${routing.reason}`,
+        },
+      });
+      if (error) throw error;
 
       await loadShipments();
     } finally {
@@ -685,14 +730,24 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
     setBusyId(shipment.id);
     setShowExceptionMenu(false);
     try {
-      await supabase
-        .from('shipments')
-        .update({ dispatch_stage: 'exception', status: 'exception', updated_at: new Date().toISOString() })
-        .eq('id', shipment.id);
-      await logShipmentEvent(
-        shipment.id, 'exception', undefined, undefined, 'admin',
-        `[${exc.label}] ${exc.note}${overrideReason ? ` — ${overrideReason}` : ''}`,
-      );
+      const { error } = await supabase.rpc('admin_update_shipment_stage', {
+        p_payload: {
+          shipment_id: shipment.id,
+          target_stage: 'exception',
+          location_name: locationNameForStage(shipment, 'exception'),
+          reason: `[${exc.label}] ${exc.note}${overrideReason ? ` — ${overrideReason}` : ''}`,
+          proofs: [
+            {
+              stage: 'exception',
+              proof_type: 'manual_admin',
+              notes: exc.note,
+              confidence_score: 0.72,
+              metadata: { exception_type: exc.key },
+            },
+          ],
+        },
+      });
+      if (error) throw error;
       await loadShipments();
       if (selectedShipment?.id === shipment.id) await loadShipmentDetails(shipment);
     } finally {
@@ -700,63 +755,28 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
     }
   };
 
-  const releaseRiderLocation = async (riderId?: string | null, nextStatus = 'available') => {
-    if (!riderId) return;
-
-    const { data: existingLocation } = await supabase
-      .from('rider_locations')
-      .select('metadata')
-      .eq('rider_id', riderId)
-      .maybeSingle();
-
-    const { error: locationError } = await supabase
-      .from('rider_locations')
-      .update({
-        current_shipment_id: null,
-        is_online: nextStatus === 'available',
-        metadata: {
-          ...(existingLocation?.metadata || {}),
-          status: nextStatus,
-          updated_by_admin_at: new Date().toISOString(),
-        },
-        updated_at: new Date().toISOString(),
-      })
-      .eq('rider_id', riderId);
-
-    if (locationError) throw locationError;
-
-    await supabase
-      .from('first_mile_pickup_agents')
-      .update({
-        availability_status: nextStatus === 'maintenance' ? 'maintenance' : nextStatus === 'available' ? 'available' : 'offline',
-        updated_at: new Date().toISOString(),
-      })
-      .eq('driver_id', riderId);
-  };
-
   const handleForceSetStage = async (shipment: any, targetStage: string) => {
     const reason = overrideReason.trim() || `Admin manually moved shipment to ${stageLabel(targetStage)}.`;
     setBusyId(`stage:${shipment.id}:${targetStage}`);
     try {
-      const { error: shipmentError } = await supabase
-        .from('shipments')
-        .update({
-          dispatch_stage: targetStage,
-          status: shipmentStatusFromStage(targetStage, shipment.routing_mode || 'last_mile_local'),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', shipment.id);
+      const { error } = await supabase.rpc('admin_update_shipment_stage', {
+        p_payload: {
+          shipment_id: shipment.id,
+          target_stage: targetStage,
+          location_name: locationNameForStage(shipment, targetStage),
+          reason,
+          proofs: [
+            {
+              stage: targetStage,
+              proof_type: 'manual_admin',
+              notes: reason,
+              confidence_score: 0.75,
+            },
+          ],
+        },
+      });
 
-      if (shipmentError) throw shipmentError;
-
-      await logShipmentEvent(
-        shipment.id,
-        targetStage as any,
-        locationNameForStage(shipment, targetStage),
-        undefined,
-        'admin',
-        reason
-      );
+      if (error) throw error;
 
       setOverrideReason('');
       await reloadShipmentContext(shipment.id);
@@ -769,46 +789,13 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
     const reason = overrideReason.trim() || 'Admin cancelled shipment and released all active assignments.';
     setBusyId(`cancel:${shipment.id}`);
     try {
-      const { error: shipmentError } = await supabase
-        .from('shipments')
-        .update({
-          dispatch_stage: 'cancelled',
-          status: 'cancelled',
-          assigned_rider_id: null,
-          final_mile_rider_id: null,
-          first_mile_pickup_agent_id: null,
-          active_pickup_request_id: null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', shipment.id);
-
-      if (shipmentError) throw shipmentError;
-
-      await supabase
-        .from('pickup_requests')
-        .update({
-          orchestration_status: 'cancelled',
-          cancelled_at: new Date().toISOString(),
-          failure_reason: reason,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('shipment_id', shipment.id)
-        .in('orchestration_status', ['submitted', 'awaiting_assignment', 'assignment_in_progress', 'assigned', 'en_route', 'picked_up']);
-
-      if (pickupQueueRecord?.assigned_agent_id) {
-        await supabase
-          .from('first_mile_pickup_agents')
-          .update({ availability_status: 'available', updated_at: new Date().toISOString() })
-          .eq('id', pickupQueueRecord.assigned_agent_id);
-      }
-
-      await Promise.all([
-        releaseRiderLocation(shipment.assigned_rider_id),
-        releaseRiderLocation(shipment.final_mile_rider_id),
-        releaseRiderLocation(shipment.first_mile_pickup_agent_id),
-      ]);
-
-      await logShipmentEvent(shipment.id, 'cancelled', locationNameForStage(shipment, 'cancelled'), undefined, 'admin', reason);
+      const { error } = await supabase.rpc('admin_cancel_shipment', {
+        p_payload: {
+          shipment_id: shipment.id,
+          reason,
+        },
+      });
+      if (error) throw error;
       setOverrideReason('');
       await reloadShipmentContext(shipment.id);
     } finally {
@@ -819,44 +806,18 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
   const handleAssignLocalRider = async (shipment: any, candidate: any) => {
     const actionKey = `assign-local:${candidate.rider_id}`;
     const reason = localRiderOpsReason.trim() || `Ops assigned ${candidate.rider_name || 'a rider'} to this shipment.`;
-    const nextStage = ['pending_routing', 'exception', 'cancelled'].includes(shipment.dispatch_stage || '')
-      ? 'awaiting_rider_acceptance'
-      : shipment.dispatch_stage || 'awaiting_rider_acceptance';
 
     setLocalRiderOpsBusy(actionKey);
     try {
-      if (shipment.assigned_rider_id && shipment.assigned_rider_id !== candidate.rider_id) {
-        await releaseRiderLocation(shipment.assigned_rider_id);
-      }
-
-      const { error: shipmentError } = await supabase
-        .from('shipments')
-        .update({
-          assigned_rider_id: candidate.rider_id,
-          dispatch_stage: nextStage,
-          status: shipmentStatusFromStage(nextStage, shipment.routing_mode || 'last_mile_local'),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', shipment.id);
-
-      if (shipmentError) throw shipmentError;
-
-      const { error: riderLocationError } = await supabase
-        .from('rider_locations')
-        .update({
-          current_shipment_id: shipment.id,
-          metadata: {
-            ...(candidate.metadata || {}),
-            status: 'busy',
-            assigned_by_admin_at: new Date().toISOString(),
-          },
-          updated_at: new Date().toISOString(),
-        })
-        .eq('rider_id', candidate.rider_id);
-
-      if (riderLocationError) throw riderLocationError;
-
-      await logShipmentEvent(shipment.id, nextStage as any, locationNameForStage(shipment, nextStage), candidate.rider_id, 'admin', reason);
+      const { error } = await supabase.rpc('admin_assign_shipment_operator', {
+        p_payload: {
+          shipment_id: shipment.id,
+          assignment_type: 'local_delivery',
+          rider_id: candidate.rider_id,
+          reason,
+        },
+      });
+      if (error) throw error;
       setLocalRiderOpsReason('');
       await reloadShipmentContext(shipment.id);
     } finally {
@@ -868,27 +829,80 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
     if (!shipment.assigned_rider_id) return;
 
     const reason = localRiderOpsReason.trim() || 'Ops released the assigned rider and returned this shipment to the rider queue.';
-    const nextStage = shipment.dispatch_stage === 'out_for_delivery' ? 'awaiting_rider_acceptance' : shipment.dispatch_stage || 'awaiting_rider_acceptance';
     setLocalRiderOpsBusy('unassign-local');
     try {
-      const { error: shipmentError } = await supabase
-        .from('shipments')
-        .update({
-          assigned_rider_id: null,
-          dispatch_stage: nextStage,
-          status: shipmentStatusFromStage(nextStage, shipment.routing_mode || 'last_mile_local'),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', shipment.id);
-
-      if (shipmentError) throw shipmentError;
-
-      await releaseRiderLocation(shipment.assigned_rider_id);
-      await logShipmentEvent(shipment.id, nextStage as any, locationNameForStage(shipment, nextStage), undefined, 'admin', reason);
+      const { error } = await supabase.rpc('admin_unassign_shipment_operator', {
+        p_payload: {
+          shipment_id: shipment.id,
+          assignment_type: 'local_delivery',
+          reason,
+        },
+      });
+      if (error) throw error;
       setLocalRiderOpsReason('');
       await reloadShipmentContext(shipment.id);
     } finally {
       setLocalRiderOpsBusy(null);
+    }
+  };
+
+  const handlePrepareDeliverEarnShipment = async (shipment: any) => {
+    const reason = deliverEarnOpsReason.trim() || 'Ops released this same-state shipment to verified Deliver & Earn car operators.';
+    setDeliverEarnOpsBusy('prepare');
+    try {
+      const { error } = await supabase.rpc('admin_prepare_deliver_and_earn_shipment', {
+        p_payload: {
+          shipment_id: shipment.id,
+          reason,
+          create_offers: true,
+          declared_value_ngn: shipment.declared_value_ngn || null,
+          risk_tier: shipment.risk_tier || 'standard',
+        },
+      });
+      if (error) throw error;
+
+      setDeliverEarnOpsReason('');
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setDeliverEarnOpsBusy(null);
+    }
+  };
+
+  const handleReofferDeliverEarnShipment = async (shipment: any) => {
+    const reason = deliverEarnOpsReason.trim() || 'Ops restarted Deliver & Earn offers for this shipment.';
+    setDeliverEarnOpsBusy('reoffer');
+    try {
+      const { error } = await supabase.rpc('admin_reoffer_deliver_and_earn_job', {
+        p_payload: {
+          shipment_id: shipment.id,
+          reason,
+        },
+      });
+      if (error) throw error;
+
+      setDeliverEarnOpsReason('');
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setDeliverEarnOpsBusy(null);
+    }
+  };
+
+  const handleReleaseDeliverEarnShipment = async (shipment: any) => {
+    const reason = deliverEarnOpsReason.trim() || 'Ops released this shipment back to the standard RENAX rider queue.';
+    setDeliverEarnOpsBusy('release-standard');
+    try {
+      const { error } = await supabase.rpc('admin_release_deliver_and_earn_shipment', {
+        p_payload: {
+          shipment_id: shipment.id,
+          reason,
+        },
+      });
+      if (error) throw error;
+
+      setDeliverEarnOpsReason('');
+      await reloadShipmentContext(shipment.id);
+    } finally {
+      setDeliverEarnOpsBusy(null);
     }
   };
 
@@ -927,7 +941,9 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
   const handleDispatchHeartbeat = async () => {
     setDispatchOpsBusy('heartbeat');
     try {
-      const { error } = await supabase.rpc('process_first_mile_dispatch_backlog', { p_limit: 100 });
+      const { error } = await supabase.rpc('admin_process_first_mile_dispatch_backlog', {
+        p_payload: { limit: 100 },
+      });
       if (error) throw error;
       await loadShipments();
     } finally {
@@ -938,10 +954,12 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
   const handleReofferWatchlistItem = async (watchlistItem: any) => {
     setDispatchOpsBusy(`reoffer:${watchlistItem.pickup_request_id}`);
     try {
-      const { error } = await supabase.rpc('offer_next_first_mile_pickup_candidate', {
-        p_pickup_request_id: watchlistItem.pickup_request_id,
-        p_force: false,
-        p_reason: 'Ops manually restarted the dispatch ladder from the watchlist.',
+      const { error } = await supabase.rpc('admin_offer_next_first_mile_pickup_candidate', {
+        p_payload: {
+          pickup_request_id: watchlistItem.pickup_request_id,
+          force: false,
+          reason: 'Ops manually restarted the dispatch ladder from the watchlist.',
+        },
       });
       if (error) throw error;
       await loadShipments();
@@ -966,14 +984,18 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
       });
       if (error) throw error;
 
-      await logShipmentEvent(
-        shipment.id,
-        shipment.dispatch_stage || 'awaiting_source_terminal',
-        terminalMap[shipment.source_terminal_id]?.name || shipment.pickup_state,
-        undefined,
-        'admin',
-        reason
-      );
+      try {
+        await logShipmentEvent(
+          shipment.id,
+          shipment.dispatch_stage || 'awaiting_source_terminal',
+          terminalMap[shipment.source_terminal_id]?.name || shipment.pickup_state,
+          undefined,
+          'admin',
+          reason
+        );
+      } catch (eventError) {
+        console.warn('Pickup request was created, but the supplemental audit note could not be saved.', eventError);
+      }
 
       setPickupOpsReason('');
       await reloadShipmentContext(shipment.id);
@@ -994,10 +1016,12 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
 
     setPickupOpsBusy(actionKey);
     try {
-      const { error } = await supabase.rpc('offer_next_first_mile_pickup_candidate', {
-        p_pickup_request_id: pickupQueueRecord.id,
-        p_force: force,
-        p_reason: reason,
+      const { error } = await supabase.rpc('admin_offer_next_first_mile_pickup_candidate', {
+        p_payload: {
+          pickup_request_id: pickupQueueRecord.id,
+          force,
+          reason,
+        },
       });
       if (error) throw error;
 
@@ -1011,7 +1035,9 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
   const handleRunPickupDispatchHeartbeat = async (shipment: any) => {
     setPickupOpsBusy('dispatch-heartbeat');
     try {
-      const { error } = await supabase.rpc('process_first_mile_dispatch_backlog', { p_limit: 100 });
+      const { error } = await supabase.rpc('admin_process_first_mile_dispatch_backlog', {
+        p_payload: { limit: 100 },
+      });
       if (error) throw error;
 
       await reloadShipmentContext(shipment.id);
@@ -1028,25 +1054,16 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
 
     setPickupOpsBusy(actionKey);
     try {
-      if (pickupQueueRecord.assigned_agent_id && pickupQueueRecord.assigned_agent_id !== candidate.pickup_agent_id) {
-        const { error } = await supabase.rpc('transfer_first_mile_pickup_agent', {
-          p_payload: {
-            pickup_request_id: pickupQueueRecord.id,
-            pickup_agent_id: candidate.pickup_agent_id,
-            reason,
-          },
-        });
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.rpc('assign_first_mile_pickup_agent', {
-          p_payload: {
-            pickup_request_id: pickupQueueRecord.id,
-            pickup_agent_id: candidate.pickup_agent_id,
-            offer_reason: reason,
-          },
-        });
-        if (error) throw error;
-      }
+      const { error } = await supabase.rpc('admin_assign_shipment_operator', {
+        p_payload: {
+          shipment_id: shipment.id,
+          assignment_type: 'first_mile',
+          pickup_request_id: pickupQueueRecord.id,
+          pickup_agent_id: candidate.pickup_agent_id,
+          reason,
+        },
+      });
+      if (error) throw error;
 
       setPickupOpsReason('');
       await reloadShipmentContext(shipment.id);
@@ -1062,8 +1079,10 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
 
     setPickupOpsBusy('unassign');
     try {
-      const { error } = await supabase.rpc('unassign_first_mile_pickup_agent', {
+      const { error } = await supabase.rpc('admin_unassign_shipment_operator', {
         p_payload: {
+          shipment_id: shipment.id,
+          assignment_type: 'first_mile',
           pickup_request_id: pickupQueueRecord.id,
           reason,
         },
@@ -1081,10 +1100,20 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
     const reason = finalMileOpsReason.trim() || 'Destination terminal ops released this parcel into the RENAX final-mile queue.';
     setFinalMileOpsBusy('release');
     try {
-      const { error } = await supabase.rpc('release_final_mile_to_marketplace', {
+      const { error } = await supabase.rpc('admin_update_shipment_stage', {
         p_payload: {
           shipment_id: shipment.id,
+          target_stage: 'awaiting_final_mile_rider',
+          location_name: terminalMap[shipment.destination_terminal_id]?.name || shipment.delivery_state || null,
           reason,
+          proofs: [
+            {
+              stage: 'awaiting_final_mile_rider',
+              proof_type: 'hub_release',
+              notes: reason,
+              confidence_score: 0.86,
+            },
+          ],
         },
       });
       if (error) throw error;
@@ -1102,13 +1131,10 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
 
     setFinalMileOpsBusy(actionKey);
     try {
-      const fn = shipment.final_mile_rider_id && shipment.final_mile_rider_id !== candidate.rider_id
-        ? 'transfer_final_mile_rider'
-        : 'assign_final_mile_rider';
-
-      const { error } = await supabase.rpc(fn, {
+      const { error } = await supabase.rpc('admin_assign_shipment_operator', {
         p_payload: {
           shipment_id: shipment.id,
+          assignment_type: 'final_mile',
           rider_id: candidate.rider_id,
           reason,
         },
@@ -1126,9 +1152,10 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
     const reason = finalMileOpsReason.trim() || 'Ops released the assigned final-mile rider and returned the parcel to the destination queue.';
     setFinalMileOpsBusy('unassign-final-mile');
     try {
-      const { error } = await supabase.rpc('unassign_final_mile_rider', {
+      const { error } = await supabase.rpc('admin_unassign_shipment_operator', {
         p_payload: {
           shipment_id: shipment.id,
+          assignment_type: 'final_mile',
           reason,
         },
       });
@@ -1392,7 +1419,15 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
                       <MoveRight size={14} color="#6b7280" style={{ marginHorizontal: 6 }} />
                       <Text style={styles.cellText}>{item.delivery_state || item.delivery_city || 'Unknown'}</Text>
                     </View>
-                    <Text style={[styles.cellText, { flex: 1.0 }]}>{routingMode === 'relay_terminal' ? 'Relay' : routingMode === 'manual_review' ? 'Review' : 'Local'}</Text>
+                    <Text style={[styles.cellText, { flex: 1.0 }]}>
+                      {item.supply_mode === 'deliver_and_earn'
+                        ? 'Deliver & Earn'
+                        : routingMode === 'relay_terminal'
+                          ? 'Relay'
+                          : routingMode === 'manual_review'
+                            ? 'Review'
+                            : 'Local'}
+                    </Text>
                     <View style={{ flex: 1.2, gap: 6 }}>
                       <Text style={[styles.cellText, { color }]}>{getShipmentStageLabel(item)}</Text>
                       <Text style={styles.microText}>{currentStatus}</Text>
@@ -1444,6 +1479,7 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
                 <View style={styles.detailsGrid}>
                   {[
                     ['Routing', selectedShipment.routing_mode === 'relay_terminal' ? 'Terminal Relay' : selectedShipment.routing_mode === 'manual_review' ? 'Manual Review' : 'Local Delivery'],
+                    ['Carrier Pool', selectedShipment.supply_mode === 'deliver_and_earn' ? 'Deliver & Earn verified car operators' : 'RENAX standard staff rider queue'],
                     ['Stage', getShipmentStageLabel(selectedShipment)],
                     ['Status', shipmentStatusLabel(selectedShipment.dispatch_stage || 'pending_routing', selectedShipment.routing_mode || 'last_mile_local')],
                     ['First Mile Plan', selectedShipment.relay_first_mile_strategy === 'renax_pickup' ? 'RENAX pickup to source terminal' : selectedShipment.routing_mode === 'relay_terminal' ? 'Customer drop-off to source terminal' : 'Direct rider dispatch'],
@@ -1455,6 +1491,7 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
                     ['Sender', selectedShipment.sender_name || 'Unknown'],
                     ['Recipient', selectedShipment.recipient_name || 'Unknown'],
                     ['Amount', selectedShipment.estimated_price ? `₦${Number(selectedShipment.estimated_price).toLocaleString()}` : 'N/A'],
+                    ['Carrier Commission', selectedShipment.carrier_commission_amount ? `₦${Number(selectedShipment.carrier_commission_amount).toLocaleString()}` : selectedShipment.supply_mode === 'deliver_and_earn' ? 'Estimated after acceptance' : 'N/A'],
                   ].map(([label, value]) => (
                     <View key={label} style={styles.detailCard}>
                       <Text style={styles.detailLabel}>{label}</Text>
@@ -1530,6 +1567,150 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
                     </Pressable>
                   </View>
                 </View>
+
+                {isDeliverEarnCompatibleShipment(selectedShipment) && (
+                  <View style={styles.pickupOpsSection}>
+                    <View style={styles.pickupOpsHeader}>
+                      <View>
+                        <Text style={styles.pickupOpsTitle}>Deliver & Earn Dispatch</Text>
+                        <Text style={styles.pickupOpsSub}>Release eligible same-state shipments to verified personal-car operators, restart offers, or return work to the standard RENAX rider queue.</Text>
+                      </View>
+                      {deliverEarnOpsLoading ? <ActivityIndicator color={BRAND.green} size="small" /> : null}
+                    </View>
+
+                    <View style={styles.pickupOpsSummaryRow}>
+                      <View style={styles.pickupOpsStat}>
+                        <Text style={styles.pickupOpsStatLabel}>Pool</Text>
+                        <Text style={styles.pickupOpsStatValue}>{selectedShipment.supply_mode === 'deliver_and_earn' ? 'Deliver & Earn' : 'Standard'}</Text>
+                      </View>
+                      <View style={styles.pickupOpsStat}>
+                        <Text style={styles.pickupOpsStatLabel}>Candidates</Text>
+                        <Text style={styles.pickupOpsStatValue}>{deliverEarnCandidates.length}</Text>
+                      </View>
+                      <View style={styles.pickupOpsStat}>
+                        <Text style={styles.pickupOpsStatLabel}>Open Offers</Text>
+                        <Text style={styles.pickupOpsStatValue}>{deliverEarnOffers.filter((offer) => offer.offer_status === 'offered').length}</Text>
+                      </View>
+                      <View style={styles.pickupOpsStat}>
+                        <Text style={styles.pickupOpsStatLabel}>Accepted</Text>
+                        <Text style={styles.pickupOpsStatValue}>{selectedShipment.deliver_and_earn_operator_id ? 'Yes' : 'No'}</Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.pickupOpsAssignedCard}>
+                      <Text style={styles.pickupOpsAssignedLabel}>Current Deliver & Earn Carrier</Text>
+                      <Text style={styles.pickupOpsAssignedValue}>
+                        {selectedShipment.deliver_and_earn_operator_id
+                          ? `Operator ${selectedShipment.deliver_and_earn_operator_id}`
+                          : selectedShipment.supply_mode === 'deliver_and_earn'
+                            ? 'Waiting for a verified operator to accept'
+                            : 'Not released to Deliver & Earn yet'}
+                      </Text>
+                      <Text style={styles.pickupOpsAssignedMeta}>
+                        {selectedShipment.pickup_state || 'Unknown pickup'} {'->'} {selectedShipment.delivery_state || 'Unknown destination'} • {selectedShipment.weight_kg || 0}kg • {selectedShipment.package_category || 'No category'}
+                      </Text>
+                    </View>
+
+                    <TextInput
+                      style={styles.overrideInput}
+                      placeholder="Deliver & Earn dispatch note, release reason, or re-offer context..."
+                      placeholderTextColor="#9ca3af"
+                      value={deliverEarnOpsReason}
+                      onChangeText={setDeliverEarnOpsReason}
+                      multiline
+                    />
+
+                    <View style={styles.pickupOpsActionRow}>
+                      {selectedShipment.supply_mode !== 'deliver_and_earn' ? (
+                        <Pressable
+                          style={styles.pickupOpsPrimaryBtn}
+                          onPress={() => handlePrepareDeliverEarnShipment(selectedShipment)}
+                          disabled={deliverEarnOpsBusy === 'prepare'}
+                        >
+                          <Text style={styles.pickupOpsPrimaryText}>
+                            {deliverEarnOpsBusy === 'prepare' ? 'Releasing...' : 'Release To Deliver & Earn'}
+                          </Text>
+                        </Pressable>
+                      ) : (
+                        <Pressable
+                          style={styles.pickupOpsPrimaryBtn}
+                          onPress={() => handleReofferDeliverEarnShipment(selectedShipment)}
+                          disabled={!!selectedShipment.deliver_and_earn_operator_id || deliverEarnOpsBusy === 'reoffer'}
+                        >
+                          <Text style={styles.pickupOpsPrimaryText}>
+                            {deliverEarnOpsBusy === 'reoffer' ? 'Re-offering...' : 'Restart Operator Offers'}
+                          </Text>
+                        </Pressable>
+                      )}
+
+                      <Pressable
+                        style={styles.pickupOpsSecondaryBtn}
+                        onPress={() => loadDeliverEarnOpsContext(selectedShipment)}
+                        disabled={deliverEarnOpsLoading}
+                      >
+                        <Text style={styles.pickupOpsSecondaryText}>{deliverEarnOpsLoading ? 'Refreshing...' : 'Refresh Operators'}</Text>
+                      </Pressable>
+
+                      {selectedShipment.supply_mode === 'deliver_and_earn' && !selectedShipment.deliver_and_earn_operator_id ? (
+                        <Pressable
+                          style={styles.pickupOpsReleaseBtn}
+                          onPress={() => handleReleaseDeliverEarnShipment(selectedShipment)}
+                          disabled={deliverEarnOpsBusy === 'release-standard'}
+                        >
+                          <Text style={styles.pickupOpsReleaseText}>
+                            {deliverEarnOpsBusy === 'release-standard' ? 'Releasing...' : 'Back To Staff Riders'}
+                          </Text>
+                        </Pressable>
+                      ) : null}
+                    </View>
+
+                    <Text style={styles.pickupOpsListTitle}>Eligible Operators</Text>
+                    {deliverEarnCandidates.length === 0 ? (
+                      <Text style={styles.timelineEmpty}>
+                        {selectedShipment.supply_mode === 'deliver_and_earn'
+                          ? 'No verified Deliver & Earn operator is currently online and eligible for this state/risk rule.'
+                          : 'Release this shipment to Deliver & Earn to calculate live operator candidates.'}
+                      </Text>
+                    ) : (
+                      <View style={styles.pickupCandidateList}>
+                        {deliverEarnCandidates.map((candidate) => (
+                          <View key={`${candidate.operator_id}:${candidate.vehicle_id}`} style={styles.pickupCandidateCard}>
+                            <View style={{ flex: 1, gap: 4 }}>
+                              <Text style={styles.pickupCandidateTitle}>{candidate.operator_name || 'Verified operator'}</Text>
+                              <Text style={styles.pickupCandidateMeta}>
+                                {candidate.vehicle_label || 'Registered vehicle'} • Score {candidate.score ?? 'N/A'}
+                              </Text>
+                              <Text style={styles.pickupCandidateMeta}>
+                                {candidate.state || 'Unknown state'} • {candidate.city || 'Unknown city'} • Seen {candidate.last_seen ? formatDate(candidate.last_seen) : 'recently'}
+                              </Text>
+                            </View>
+                            <View style={styles.rulePill}>
+                              <Text style={styles.rulePillText}>Eligible</Text>
+                            </View>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+
+                    {deliverEarnOffers.length > 0 ? (
+                      <>
+                        <Text style={styles.pickupOpsListTitle}>Recent Offers</Text>
+                        <View style={styles.pickupAttemptList}>
+                          {deliverEarnOffers.slice(0, 6).map((offer) => (
+                            <View key={offer.id} style={styles.pickupAttemptCard}>
+                              <Text style={styles.pickupAttemptTitle}>
+                                Offer {offer.offer_rank || 1} • {String(offer.offer_status || 'offered').replace(/_/g, ' ')}
+                              </Text>
+                              <Text style={styles.pickupAttemptMeta}>
+                                Score {offer.score ?? 'N/A'} • expires {offer.expires_at ? formatDate(offer.expires_at) : 'soon'}
+                              </Text>
+                            </View>
+                          ))}
+                        </View>
+                      </>
+                    ) : null}
+                  </View>
+                )}
 
                 {isLocalRiderManagedShipment(selectedShipment) && (
                   <View style={styles.pickupOpsSection}>
@@ -2012,7 +2193,11 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
                         style={[styles.modalActionPrimary, { alignSelf: 'flex-start' }]}
                         onPress={async () => {
                           if (!hubScanValue.trim() || !selectedShipment) return;
-                          await logShipmentEvent(selectedShipment.id, selectedShipment.dispatch_stage || 'exception', undefined, undefined, 'admin', `Hub scan recorded: ${hubScanValue.trim()}`);
+                          try {
+                            await logShipmentEvent(selectedShipment.id, selectedShipment.dispatch_stage || 'exception', undefined, undefined, 'admin', `Hub scan recorded: ${hubScanValue.trim()}`);
+                          } catch (eventError) {
+                            console.warn('Unable to save hub scan audit event.', eventError);
+                          }
                           setHubScanValue('');
                           await loadShipmentDetails(selectedShipment);
                         }}
@@ -2259,6 +2444,8 @@ const styles = StyleSheet.create({
   pickupCandidateActionAssigned: { backgroundColor: '#DCFCE7' },
   pickupCandidateActionText: { color: '#1a1a1a', fontWeight: '800', fontSize: 12 },
   pickupCandidateActionTextAssigned: { color: '#166534' },
+  rulePill: { backgroundColor: '#ECFDF5', borderRadius: 8, paddingHorizontal: 9, paddingVertical: 5, borderWidth: 1, borderColor: '#A7F3D0' },
+  rulePillText: { color: '#047857', fontSize: 11, fontWeight: '900' },
   pickupAttemptList: { gap: 10 },
   pickupAttemptCard: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 12, padding: 12, gap: 4 },
   pickupAttemptTitle: { fontSize: 13, color: '#111827', fontWeight: '700' },
