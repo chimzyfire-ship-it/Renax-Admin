@@ -509,106 +509,14 @@ export async function enrollFleetStaff(payload: {
 }
 
 export async function removeFleetStaffFromOps(riderId: string) {
-  const nowIso = new Date().toISOString();
-  const { data: pickupAgentRows } = await supabase
-    .from('first_mile_pickup_agents')
-    .select('id')
-    .eq('driver_id', riderId)
-    .in('registration_status', ['pending_approval', 'active', 'suspended']);
-  const pickupAgentIds = (pickupAgentRows || []).map((row: any) => row.id).filter(Boolean);
+  const { error } = await supabase.rpc('admin_remove_fleet_staff_from_ops', {
+    p_payload: {
+      rider_id: riderId,
+      reason: 'Fleet admin removed staff member from operations.',
+    },
+  });
 
-  await Promise.all([
-    supabase
-      .from('shipments')
-      .update({
-        assigned_rider_id: null,
-        dispatch_stage: 'awaiting_rider_acceptance',
-        status: 'pending',
-        updated_at: nowIso,
-      })
-      .eq('assigned_rider_id', riderId)
-      .in('dispatch_stage', ['awaiting_rider_acceptance', 'out_for_delivery']),
-    supabase
-      .from('shipments')
-      .update({
-        final_mile_rider_id: null,
-        dispatch_stage: 'awaiting_final_mile_rider',
-        status: 'in_progress',
-        updated_at: nowIso,
-      })
-      .eq('final_mile_rider_id', riderId)
-      .in('dispatch_stage', ['awaiting_final_mile_rider', 'out_for_delivery']),
-    supabase
-      .from('shipments')
-      .update({
-        first_mile_pickup_agent_id: null,
-        dispatch_stage: 'awaiting_rider_acceptance',
-        status: 'pending',
-        updated_at: nowIso,
-      })
-      .eq('first_mile_pickup_agent_id', riderId)
-      .in('dispatch_stage', ['awaiting_rider_acceptance', 'awaiting_source_terminal']),
-    pickupAgentIds.length
-      ? supabase
-          .from('pickup_requests')
-          .update({
-            assigned_agent_id: null,
-            orchestration_status: 'awaiting_assignment',
-            failure_reason: 'Assigned pickup driver was removed from the ops roster.',
-            updated_at: nowIso,
-          })
-          .in('assigned_agent_id', pickupAgentIds)
-          .in('orchestration_status', ['assignment_in_progress', 'assigned', 'en_route'])
-      : Promise.resolve({ error: null } as any),
-  ]);
-
-  const { error: profileError } = await supabase
-    .from('profiles')
-    .update({
-      role: 'customer',
-      logistics_roles: [],
-      assigned_terminal_id: null,
-      preferred_terminal_code: null,
-      is_online: false,
-      updated_at: nowIso,
-    })
-    .eq('id', riderId);
-
-  if (profileError) throw profileError;
-
-  const { data: existingLocation } = await supabase
-    .from('rider_locations')
-    .select('metadata')
-    .eq('rider_id', riderId)
-    .maybeSingle();
-
-  const { error: locationError } = await supabase
-    .from('rider_locations')
-    .update({
-      is_online: false,
-      current_shipment_id: null,
-      metadata: {
-        ...(existingLocation?.metadata || {}),
-        status: 'offline',
-        removed_from_ops: true,
-        removed_from_ops_at: nowIso,
-      },
-      updated_at: nowIso,
-      last_seen: nowIso,
-    })
-    .eq('rider_id', riderId);
-
-  if (locationError) throw locationError;
-
-  await supabase
-    .from('first_mile_pickup_agents')
-    .update({
-      registration_status: 'retired',
-      availability_status: 'offline',
-      updated_at: nowIso,
-    })
-    .eq('driver_id', riderId)
-    .in('registration_status', ['pending_approval', 'active', 'suspended']);
+  if (error) throw error;
 }
 
 export async function fetchAnalyticsData(rangeKey = '30d') {

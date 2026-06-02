@@ -480,6 +480,23 @@ export async function updateShipmentStageWithProof(params: {
   const proofSummary = summarizeProofs(proofs);
   const proofScore = deriveStageTrustScore(proofs);
   const verifiedAtColumn = STAGE_VERIFIED_AT_COLUMNS[stage];
+
+  if ((actorRole || '').toLowerCase() === 'admin') {
+    const { error } = await supabase.rpc('admin_update_shipment_stage', {
+      p_payload: {
+        shipment_id: shipmentId,
+        target_stage: stage,
+        location_name: locationName || null,
+        reason: notes || 'Admin advanced shipment through the controlled dispatch flow.',
+        proofs,
+        shipment_patch: shipmentPatch,
+      },
+    });
+
+    if (error) throw error;
+    return;
+  }
+
   const patch: Record<string, any> = {
     dispatch_stage: stage,
     status: shipmentStatusFromStage(stage, routingMode),
