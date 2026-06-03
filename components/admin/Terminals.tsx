@@ -55,10 +55,21 @@ export default function Terminals() {
     setBusyId(shipment.id);
     try {
       if (shipment.dispatch_stage === 'received_at_destination_terminal' && shipment.relay_last_mile_strategy !== 'recipient_pickup') {
-        const { error } = await supabase.rpc('release_final_mile_to_marketplace', {
+        const destinationTerminal = terminals.find((terminal) => terminal.id === shipment.destination_terminal_id);
+        const { error } = await supabase.rpc('admin_update_shipment_stage', {
           p_payload: {
             shipment_id: shipment.id,
+            target_stage: 'awaiting_final_mile_rider',
+            location_name: destinationTerminal?.name || shipment.delivery_state || null,
             reason: 'Terminal ops released the shipment into the RENAX final-mile delivery queue.',
+            proofs: [
+              {
+                stage: 'awaiting_final_mile_rider',
+                proof_type: 'hub_release',
+                notes: 'Destination terminal released parcel into final-mile queue.',
+                confidence_score: 0.86,
+              },
+            ],
           },
         });
         if (error) throw error;
