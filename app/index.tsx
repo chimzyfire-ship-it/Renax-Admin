@@ -73,6 +73,7 @@ export default function AdminScreen() {
   const [loading, setLoading] = useState(true);
   const [hasAdminClaim, setHasAdminClaim] = useState(false);
   const [adminContext, setAdminContext] = useState<any>(null);
+  const [authIssue, setAuthIssue] = useState('');
   const [currentMenu, setCurrentMenu] = useState<string>('dashboard');
   const [shipmentFocus, setShipmentFocus] = useState<{
     shipmentId?: string;
@@ -82,30 +83,84 @@ export default function AdminScreen() {
   }>({ version: 0 });
 
   useEffect(() => {
-    const loadAdminContext = async () => {
-      const { data, error } = await supabase.rpc('current_admin_context');
-      setAdminContext(error ? null : data);
+    let isMounted = true;
+
+    const finishLoading = () => {
+      if (isMounted) setLoading(false);
     };
 
-    supabase.auth.getSession().then(async ({ data: { session: nextSession } }) => {
+    const applySession = async (nextSession: any) => {
+      if (!isMounted) return;
+
       setSession(nextSession);
-      setHasAdminClaim(resolveClaimRole(nextSession?.user) === 'admin');
-      if (nextSession) await loadAdminContext();
-      else setAdminContext(null);
+      setAuthIssue('');
+
+      const nextHasAdminClaim = resolveClaimRole(nextSession?.user) === 'admin';
+      setHasAdminClaim(nextHasAdminClaim);
+
+      if (!nextSession) {
+        setAdminContext(null);
+        finishLoading();
+        return;
+      }
+
+      if (!nextHasAdminClaim) {
+        setAdminContext(null);
+        finishLoading();
+        return;
+      }
+
+      try {
+        const { data, error } = await supabase.rpc('current_admin_context');
+        if (!isMounted) return;
+        if (error) {
+          console.error('Failed to load admin context', error);
+          setAdminContext(null);
+          setAuthIssue(error.message || 'Admin context could not be loaded.');
+        } else {
+          setAdminContext(data);
+        }
+      } catch (error) {
+        console.error('Admin context request failed', error);
+        if (isMounted) {
+          setAdminContext(null);
+          setAuthIssue(error instanceof Error ? error.message : 'Admin context request failed.');
+        }
+      } finally {
+        finishLoading();
+      }
+    };
+
+    const bootTimeout = setTimeout(() => {
+      if (!isMounted) return;
+      setAuthIssue('Admin session check timed out. Refresh the page, or sign in again if the session is stale.');
       setLoading(false);
-    });
+    }, 8000);
+
+    supabase.auth.getSession()
+      .then(({ data: { session: nextSession } }) => applySession(nextSession))
+      .catch((error) => {
+        console.error('Admin session bootstrap failed', error);
+        if (!isMounted) return;
+        setSession(null);
+        setHasAdminClaim(false);
+        setAdminContext(null);
+        setAuthIssue(error instanceof Error ? error.message : 'Admin session bootstrap failed.');
+        finishLoading();
+      })
+      .finally(() => clearTimeout(bootTimeout));
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (_event, nextSession) => {
-      setSession(nextSession);
-      setHasAdminClaim(resolveClaimRole(nextSession?.user) === 'admin');
-      if (nextSession) await loadAdminContext();
-      else setAdminContext(null);
-      setLoading(false);
+      await applySession(nextSession);
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      isMounted = false;
+      clearTimeout(bootTimeout);
+      subscription.unsubscribe();
+    };
   }, []);
 
   if (loading) return <LoadingScreen />;
@@ -177,7 +232,7 @@ export default function AdminScreen() {
       currentMenu={currentMenu}
       onMenuChange={(menu: string) => setCurrentMenu(menu)}
       onLogout={() => supabase.auth.signOut()}
-      adminContext={adminContext}
+      adminContext={authIssue ? { ...(adminContext || {}), authIssue } : adminContext}
     >
       {renderContent()}
     </AdminLayout>
