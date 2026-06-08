@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, ActivityIndicator } from 'react-native';
+import { View, Text, ActivityIndicator, Pressable } from 'react-native';
 import AdminAuthScreen from '../components/admin/AdminAuthScreen';
 import AdminLayout from '../components/admin/AdminLayout';
 import AdminDashboard from '../components/admin/AdminDashboard';
@@ -46,7 +46,7 @@ function LoadingScreen() {
   );
 }
 
-function AdminAccessNotice({ email }: { email?: string | null }) {
+function AdminAccessNotice({ email, onSignOut }: { email?: string | null; onSignOut: () => void }) {
   return (
     <View style={{ flex: 1, backgroundColor: '#020f09', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
       <View style={{ width: '100%', maxWidth: 520, backgroundColor: 'rgba(2, 15, 9, 0.95)', borderRadius: 20, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', padding: 24 }}>
@@ -57,12 +57,30 @@ function AdminAccessNotice({ email }: { email?: string | null }) {
         <Text style={{ color: 'rgba(255,255,255,0.72)', fontSize: 15, lineHeight: 22, textAlign: 'center', marginBottom: 16 }}>
           This account signed in successfully, but the backend still does not see a valid admin role claim on its session.
         </Text>
-        <Text style={{ color: 'rgba(255,255,255,0.58)', fontSize: 14, lineHeight: 21, textAlign: 'center', marginBottom: 20 }}>
+        <Text style={{ color: 'rgba(255,255,255,0.58)', fontSize: 14, lineHeight: 21, textAlign: 'center', marginBottom: 12 }}>
           Signed-in account: {email || 'unknown'}
         </Text>
-        <Text style={{ color: 'rgba(255,255,255,0.58)', fontSize: 14, lineHeight: 21, textAlign: 'center', marginBottom: 20 }}>
+        <Text style={{ color: 'rgba(255,255,255,0.45)', fontSize: 14, lineHeight: 21, textAlign: 'center', marginBottom: 24 }}>
           To use protected admin actions, this user needs `app_metadata.role = admin` or an `app_metadata.roles` entry containing `admin`.
         </Text>
+        <Pressable
+          style={({ pressed }) => ({
+            backgroundColor: pressed ? '#c5e200' : BRAND.lime,
+            borderRadius: 10,
+            paddingVertical: 14,
+            alignItems: 'center',
+            justifyContent: 'center',
+            shadowColor: BRAND.lime,
+            shadowOpacity: 0.3,
+            shadowRadius: 10,
+            elevation: 3,
+          })}
+          onPress={onSignOut}
+        >
+          <Text style={{ color: BRAND.green, fontSize: 16, fontWeight: '700', letterSpacing: 0.5 }}>
+            Sign Out & Switch Account
+          </Text>
+        </Pressable>
       </View>
     </View>
   );
@@ -170,7 +188,7 @@ export default function AdminScreen() {
   }
 
   if (!hasAdminClaim) {
-    return <AdminAccessNotice email={session?.user?.email || null} />;
+    return <AdminAccessNotice email={session?.user?.email || null} onSignOut={() => supabase.auth.signOut()} />;
   }
 
   const renderContent = () => {
