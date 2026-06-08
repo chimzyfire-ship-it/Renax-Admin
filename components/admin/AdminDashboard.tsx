@@ -18,6 +18,31 @@ const formatDate = (dateStr: string) =>
     minute: '2-digit',
   });
 
+const EMPTY_OVERVIEW = {
+  metrics: {
+    activeShipments: 0,
+    relayShipments: 0,
+    ridersOnline: 0,
+    ridersBusy: 0,
+    revenueToday: 0,
+    terminalBacklog: 0,
+    exceptions: 0,
+    deliveredToday: 0,
+  },
+  stageBreakdown: {
+    awaiting_rider_acceptance: 0,
+    awaiting_source_terminal_dropoff: 0,
+    at_source_hub: 0,
+    linehaul: 0,
+    awaiting_final_mile: 0,
+    out_for_delivery: 0,
+    exception: 0,
+  },
+  terminalLoads: [],
+  recentShipments: [],
+  riderSnapshots: [],
+};
+
 type AdminDashboardProps = {
   onOpenShipments?: (params?: { shipmentId?: string; stage?: string; terminalId?: string }) => void;
 };
@@ -35,13 +60,11 @@ export default function AdminDashboard({ onOpenShipments }: AdminDashboardProps)
     setLoading(true);
     setError(null);
     try {
-      const data = await Promise.race([
-        fetchAdminOverview(),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Dashboard data load timed out after 15 seconds.')), 15000)),
-      ]);
-      setOverview(data);
+      const data = await fetchAdminOverview();
+      setOverview(data || EMPTY_OVERVIEW);
     } catch (err: any) {
       console.error('[AdminDashboard] loadOverview failed:', err);
+      setOverview((current: any) => current || EMPTY_OVERVIEW);
       setError(err?.message || 'Failed to load dashboard data.');
     } finally {
       setLoading(false);
@@ -86,23 +109,29 @@ export default function AdminDashboard({ onOpenShipments }: AdminDashboardProps)
         </Pressable>
       </View>
 
-      {loading ? (
+      {error ? (
+        <View style={styles.inlineWarning}>
+          <AlertCircle color="#B45309" size={18} />
+          <Text style={styles.inlineWarningText}>
+            Dashboard refreshed with partial data. {error}
+          </Text>
+        </View>
+      ) : null}
+
+      {loading && !overview ? (
         <View style={styles.centerState}>
           <ActivityIndicator color={BRAND.green} size="large" />
           <Text style={{ color: '#6B7280', fontSize: 13, marginTop: 12 }}>Loading dashboard data…</Text>
         </View>
-      ) : error ? (
-        <View style={styles.centerState}>
-          <AlertCircle color="#DC2626" size={36} />
-          <Text style={{ color: '#DC2626', fontSize: 16, fontWeight: '700', marginTop: 12, textAlign: 'center' }}>Dashboard Load Error</Text>
-          <Text style={{ color: '#6B7280', fontSize: 14, marginTop: 8, textAlign: 'center', maxWidth: 400 }}>{error}</Text>
-          <Pressable style={[styles.refreshBtn, { marginTop: 16 }]} onPress={loadOverview}>
-            <RefreshCw color="#003822" size={16} />
-            <Text style={styles.refreshBtnText}>Retry</Text>
-          </Pressable>
-        </View>
       ) : (
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 32 }}>
+          {loading ? (
+            <View style={styles.refreshingPill}>
+              <ActivityIndicator color={BRAND.green} size="small" />
+              <Text style={styles.refreshingText}>Refreshing dashboard...</Text>
+            </View>
+          ) : null}
+
           <View style={styles.statsContainer}>
             {[
               {
@@ -384,6 +413,43 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     minHeight: 320,
+  },
+  inlineWarning: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1,
+    borderColor: '#FCD34D',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 16,
+  },
+  inlineWarningText: {
+    flex: 1,
+    color: '#92400E',
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 18,
+  },
+  refreshingPill: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#ECFDF5',
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 16,
+  },
+  refreshingText: {
+    color: '#047857',
+    fontSize: 12,
+    fontWeight: '800',
   },
   statsContainer: {
     flexDirection: 'row',
