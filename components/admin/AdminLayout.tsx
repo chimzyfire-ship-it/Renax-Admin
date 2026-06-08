@@ -71,7 +71,11 @@ async function pushNotif(
   body: string,
   reference_id?: string
 ) {
-  await supabase.from('admin_notifications').insert({ type, title, body, reference_id: reference_id ?? null });
+  try {
+    await supabase.from('admin_notifications').insert({ type, title, body, reference_id: reference_id ?? null });
+  } catch (err) {
+    console.warn('[AdminLayout] Failed to push notification:', err);
+  }
 }
 
 /** Watch shipments table for new inserts / status changes */
@@ -206,12 +210,16 @@ export default function AdminLayout({ children, currentMenu = 'dashboard', onMen
 
   /* ── Load notifications on mount + realtime subscription ── */
   const loadNotifications = useCallback(async () => {
-    const { data } = await supabase
-      .from('admin_notifications')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(60);
-    if (data) setNotifications(data as AdminNotification[]);
+    try {
+      const { data } = await supabase
+        .from('admin_notifications')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(60);
+      if (data) setNotifications(data as AdminNotification[]);
+    } catch (err) {
+      console.warn('[AdminLayout] Failed to load notifications:', err);
+    }
   }, []);
 
   useEffect(() => {

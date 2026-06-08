@@ -29,12 +29,20 @@ export default function AdminDashboard({ onOpenShipments }: AdminDashboardProps)
   const glass = Platform.OS === 'web' ? { backdropFilter: 'blur(16px)' } : {};
   const [overview, setOverview] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const loadOverview = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
-      const data = await fetchAdminOverview();
+      const data = await Promise.race([
+        fetchAdminOverview(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Dashboard data load timed out after 15 seconds.')), 15000)),
+      ]);
       setOverview(data);
+    } catch (err: any) {
+      console.error('[AdminDashboard] loadOverview failed:', err);
+      setError(err?.message || 'Failed to load dashboard data.');
     } finally {
       setLoading(false);
     }
@@ -81,6 +89,17 @@ export default function AdminDashboard({ onOpenShipments }: AdminDashboardProps)
       {loading ? (
         <View style={styles.centerState}>
           <ActivityIndicator color={BRAND.green} size="large" />
+          <Text style={{ color: '#6B7280', fontSize: 13, marginTop: 12 }}>Loading dashboard data…</Text>
+        </View>
+      ) : error ? (
+        <View style={styles.centerState}>
+          <AlertCircle color="#DC2626" size={36} />
+          <Text style={{ color: '#DC2626', fontSize: 16, fontWeight: '700', marginTop: 12, textAlign: 'center' }}>Dashboard Load Error</Text>
+          <Text style={{ color: '#6B7280', fontSize: 14, marginTop: 8, textAlign: 'center', maxWidth: 400 }}>{error}</Text>
+          <Pressable style={[styles.refreshBtn, { marginTop: 16 }]} onPress={loadOverview}>
+            <RefreshCw color="#003822" size={16} />
+            <Text style={styles.refreshBtnText}>Retry</Text>
+          </Pressable>
         </View>
       ) : (
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 32 }}>

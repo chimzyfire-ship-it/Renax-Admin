@@ -94,19 +94,39 @@ function buildDayBuckets(rangeKey: string) {
   });
 }
 
+async function safeQuery<T>(label: string, queryFn: () => PromiseLike<{ data: T | null; error: any }>): Promise<T | null> {
+  try {
+    const { data, error } = await queryFn();
+    if (error) {
+      console.warn(`[AdminData] ${label} query error:`, error.message || error);
+      return null;
+    }
+    return data;
+  } catch (err) {
+    console.warn(`[AdminData] ${label} query threw:`, err);
+    return null;
+  }
+}
+
 export async function fetchAdminOverview() {
   const todayIso = startOfTodayIso();
 
-  const [{ data: shipments }, { data: riderLocations }, { data: terminals }] = await Promise.all([
-    supabase
-      .from('shipments')
-      .select('id, tracking_id, sender_name, recipient_name, pickup_state, delivery_state, routing_mode, dispatch_stage, status, estimated_price, source_terminal_id, destination_terminal_id, created_at, updated_at'),
-    supabase
-      .from('rider_locations')
-      .select('rider_id, is_online, current_shipment_id, last_seen, metadata, profiles(full_name, phone_number)'),
-    supabase
-      .from('terminals')
-      .select('id, name, code, city, state, status'),
+  const [shipments, riderLocations, terminals] = await Promise.all([
+    safeQuery('shipments', () =>
+      supabase
+        .from('shipments')
+        .select('id, tracking_id, sender_name, recipient_name, pickup_state, delivery_state, routing_mode, dispatch_stage, status, estimated_price, source_terminal_id, destination_terminal_id, created_at, updated_at')
+    ),
+    safeQuery('rider_locations', () =>
+      supabase
+        .from('rider_locations')
+        .select('rider_id, is_online, current_shipment_id, last_seen, metadata, profiles(full_name, phone_number)')
+    ),
+    safeQuery('terminals', () =>
+      supabase
+        .from('terminals')
+        .select('id, name, code, city, state, status')
+    ),
   ]);
 
   const safeShipments = shipments || [];
@@ -170,17 +190,23 @@ export async function fetchAdminOverview() {
 export async function fetchFleetRows() {
   const todayIso = startOfTodayIso();
 
-  const [{ data: riderLocations }, { data: shipments }, { data: terminals }] = await Promise.all([
-    supabase
-      .from('rider_locations')
-      .select('rider_id, lat, lng, is_online, last_seen, current_shipment_id, metadata, profiles(id, full_name, phone_number, preferred_terminal_code, assigned_terminal_id, role, state, city, logistics_roles)')
-      .order('last_seen', { ascending: false }),
-    supabase
-      .from('shipments')
-      .select('id, tracking_id, assigned_rider_id, final_mile_rider_id, dispatch_stage, status, pickup_state, delivery_state, updated_at, created_at'),
-    supabase
-      .from('terminals')
-      .select('id, name, code, city, state, address, status'),
+  const [riderLocations, shipments, terminals] = await Promise.all([
+    safeQuery('fleet_rider_locations', () =>
+      supabase
+        .from('rider_locations')
+        .select('rider_id, lat, lng, is_online, last_seen, current_shipment_id, metadata, profiles(id, full_name, phone_number, preferred_terminal_code, assigned_terminal_id, role, state, city, logistics_roles)')
+        .order('last_seen', { ascending: false })
+    ),
+    safeQuery('fleet_shipments', () =>
+      supabase
+        .from('shipments')
+        .select('id, tracking_id, assigned_rider_id, final_mile_rider_id, dispatch_stage, status, pickup_state, delivery_state, updated_at, created_at')
+    ),
+    safeQuery('fleet_terminals', () =>
+      supabase
+        .from('terminals')
+        .select('id, name, code, city, state, address, status')
+    ),
   ]);
 
   const safeLocations = riderLocations || [];
