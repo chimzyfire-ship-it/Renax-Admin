@@ -47,6 +47,12 @@ const statusColor = (status?: string | null) => {
 const statusLabel = (status?: string | null) =>
   status ? status.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase()) : 'Not Started';
 
+const getOneYearFutureDateStr = () => {
+  const date = new Date();
+  date.setFullYear(date.getFullYear() + 1);
+  return date.toISOString().split('T')[0];
+};
+
 export default function DeliverAndEarn() {
   const { width } = useWindowDimensions();
   const isCompact = width < 820;
@@ -57,9 +63,9 @@ export default function DeliverAndEarn() {
   const [search, setSearch] = useState('');
   const [reviewNotes, setReviewNotes] = useState('');
   const [validationDates, setValidationDates] = useState({
-    insuranceExpiresAt: '',
-    roadworthinessExpiresAt: '',
-    registrationExpiresAt: '',
+    insuranceExpiresAt: getOneYearFutureDateStr(),
+    roadworthinessExpiresAt: getOneYearFutureDateStr(),
+    registrationExpiresAt: getOneYearFutureDateStr(),
   });
   const [message, setMessage] = useState('');
 
