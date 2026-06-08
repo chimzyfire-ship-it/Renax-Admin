@@ -95,6 +95,13 @@ export default function AdminDashboard({ onOpenShipments }: AdminDashboardProps)
   const terminalLoads = overview?.terminalLoads || [];
   const recentShipments = overview?.recentShipments || [];
   const riderSnapshots = overview?.riderSnapshots || [];
+  const dataIssues = Array.isArray(overview?.dataIssues) ? overview.dataIssues : [];
+  const dataWarning = error
+    || (overview?.isPotentiallyPermissionLimited
+      ? dataIssues.length
+        ? `Some dashboard sources could not load: ${dataIssues.slice(0, 3).join('; ')}`
+        : 'Dashboard data came back empty from core protected tables. If this is not expected, switch to a fully permissioned admin account or refresh after RBAC finishes loading.'
+      : null);
 
   return (
     <View style={styles.container}>
@@ -109,11 +116,11 @@ export default function AdminDashboard({ onOpenShipments }: AdminDashboardProps)
         </Pressable>
       </View>
 
-      {error ? (
+      {dataWarning ? (
         <View style={styles.inlineWarning}>
           <AlertCircle color="#B45309" size={18} />
           <Text style={styles.inlineWarningText}>
-            Dashboard refreshed with partial data. {error}
+            {dataWarning}
           </Text>
         </View>
       ) : null}

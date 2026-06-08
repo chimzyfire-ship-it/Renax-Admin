@@ -98,7 +98,11 @@ function buildDayBuckets(rangeKey: string) {
   });
 }
 
-async function safeQuery<T>(label: string, queryFn: () => PromiseLike<{ data: T | null; error: any }>): Promise<T | null> {
+async function safeQuery<T>(
+  label: string,
+  queryFn: () => PromiseLike<{ data: T | null; error: any }>,
+  issues?: string[],
+): Promise<T | null> {
   try {
     const timeoutResult = new Promise<{ data: T | null; error: any }>((resolve) => {
       setTimeout(() => {
@@ -112,17 +116,20 @@ async function safeQuery<T>(label: string, queryFn: () => PromiseLike<{ data: T 
     const { data, error } = await Promise.race([queryFn(), timeoutResult]);
     if (error) {
       console.warn(`[AdminData] ${label} query error:`, error.message || error);
+      issues?.push(`${label}: ${error.message || 'query failed'}`);
       return null;
     }
     return data;
   } catch (err) {
     console.warn(`[AdminData] ${label} query threw:`, err);
+    issues?.push(`${label}: ${err instanceof Error ? err.message : 'query failed'}`);
     return null;
   }
 }
 
 export async function fetchAdminOverview() {
   const todayIso = startOfTodayIso();
+  const dataIssues: string[] = [];
 
   const [activeShipments, recentShipmentRows, deliveredTodayRows, riderLocations, terminals] = await Promise.all([
     safeQuery('active_shipments', () =>
@@ -131,14 +138,16 @@ export async function fetchAdminOverview() {
         .select(SHIPMENT_OVERVIEW_SELECT)
         .in('dispatch_stage', OVERVIEW_STAGE_FILTER)
         .order('updated_at', { ascending: false })
-        .limit(1000)
+        .limit(1000),
+      dataIssues
     ),
     safeQuery('recent_shipments', () =>
       supabase
         .from('shipments')
         .select(SHIPMENT_OVERVIEW_SELECT)
         .order('created_at', { ascending: false })
-        .limit(80)
+        .limit(80),
+      dataIssues
     ),
     safeQuery('delivered_today_shipments', () =>
       supabase
@@ -147,20 +156,23 @@ export async function fetchAdminOverview() {
         .eq('dispatch_stage', 'delivered')
         .gte('updated_at', todayIso)
         .order('updated_at', { ascending: false })
-        .limit(1000)
+        .limit(1000),
+      dataIssues
     ),
     safeQuery('rider_locations', () =>
       supabase
         .from('rider_locations')
         .select('rider_id, is_online, current_shipment_id, last_seen, metadata')
         .order('last_seen', { ascending: false })
-        .limit(500)
+        .limit(500),
+      dataIssues
     ),
     safeQuery('terminals', () =>
       supabase
         .from('terminals')
         .select('id, name, code, city, state, status')
-        .limit(200)
+        .limit(200),
+      dataIssues
     ),
   ]);
 
@@ -199,6 +211,8 @@ export async function fetchAdminOverview() {
   }));
 
   return {
+    dataIssues,
+    isPotentiallyPermissionLimited: dataIssues.length > 0 || (!safeTerminals.length && !recentShipments.length && !safeRiders.length),
     metrics: {
       activeShipments: safeShipments.filter((shipment: any) => ACTIVE_STAGES.includes(shipment.dispatch_stage)).length,
       relayShipments: safeShipments.filter((shipment: any) => shipment.routing_mode === 'relay_terminal' && ACTIVE_STAGES.includes(shipment.dispatch_stage)).length,
