@@ -141,7 +141,7 @@ export async function fetchDeliverAndEarnAdminData(): Promise<DeliverAndEarnAdmi
   const [profilesResult, vehiclesResult, earningsResult, payoutsResult, incidentsResult, rulesResult, availabilityResult, dispatchWatchlistResult] = await Promise.all([
     supabase
       .from('deliver_and_earn_profiles')
-      .select('*, profiles(full_name, email, phone_number)')
+      .select('*, profiles:profiles!deliver_and_earn_profiles_profile_id_fkey(full_name, email, phone_number)')
       .order('updated_at', { ascending: false }),
     supabase
       .from('deliver_and_earn_vehicles')
