@@ -21,6 +21,10 @@ const TERMINAL_BACKLOG_STAGES = [
   'awaiting_final_mile_rider',
 ];
 
+const OVERVIEW_QUERY_TIMEOUT_MS = 6000;
+const SHIPMENT_OVERVIEW_SELECT = 'id, tracking_id, sender_name, recipient_name, pickup_state, delivery_state, routing_mode, dispatch_stage, status, estimated_price, source_terminal_id, destination_terminal_id, created_at, updated_at';
+const OVERVIEW_STAGE_FILTER = Array.from(new Set([...ACTIVE_STAGES, 'exception']));
+
 const startOfTodayIso = () => {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -96,7 +100,16 @@ function buildDayBuckets(rangeKey: string) {
 
 async function safeQuery<T>(label: string, queryFn: () => PromiseLike<{ data: T | null; error: any }>): Promise<T | null> {
   try {
-    const { data, error } = await queryFn();
+    const timeoutResult = new Promise<{ data: T | null; error: any }>((resolve) => {
+      setTimeout(() => {
+        resolve({
+          data: null,
+          error: new Error(`${label} query timed out after ${OVERVIEW_QUERY_TIMEOUT_MS / 1000} seconds`),
+        });
+      }, OVERVIEW_QUERY_TIMEOUT_MS);
+    });
+
+    const { data, error } = await Promise.race([queryFn(), timeoutResult]);
     if (error) {
       console.warn(`[AdminData] ${label} query error:`, error.message || error);
       return null;
@@ -111,30 +124,59 @@ async function safeQuery<T>(label: string, queryFn: () => PromiseLike<{ data: T 
 export async function fetchAdminOverview() {
   const todayIso = startOfTodayIso();
 
-  const [shipments, riderLocations, terminals] = await Promise.all([
-    safeQuery('shipments', () =>
+  const [activeShipments, recentShipmentRows, deliveredTodayRows, riderLocations, terminals] = await Promise.all([
+    safeQuery('active_shipments', () =>
       supabase
         .from('shipments')
-        .select('id, tracking_id, sender_name, recipient_name, pickup_state, delivery_state, routing_mode, dispatch_stage, status, estimated_price, source_terminal_id, destination_terminal_id, created_at, updated_at')
+        .select(SHIPMENT_OVERVIEW_SELECT)
+        .in('dispatch_stage', OVERVIEW_STAGE_FILTER)
+        .order('updated_at', { ascending: false })
+        .limit(1000)
+    ),
+    safeQuery('recent_shipments', () =>
+      supabase
+        .from('shipments')
+        .select(SHIPMENT_OVERVIEW_SELECT)
+        .order('created_at', { ascending: false })
+        .limit(80)
+    ),
+    safeQuery('delivered_today_shipments', () =>
+      supabase
+        .from('shipments')
+        .select(SHIPMENT_OVERVIEW_SELECT)
+        .eq('dispatch_stage', 'delivered')
+        .gte('updated_at', todayIso)
+        .order('updated_at', { ascending: false })
+        .limit(1000)
     ),
     safeQuery('rider_locations', () =>
       supabase
         .from('rider_locations')
-        .select('rider_id, is_online, current_shipment_id, last_seen, metadata, profiles(full_name, phone_number)')
+        .select('rider_id, is_online, current_shipment_id, last_seen, metadata')
+        .order('last_seen', { ascending: false })
+        .limit(500)
     ),
     safeQuery('terminals', () =>
       supabase
         .from('terminals')
         .select('id, name, code, city, state, status')
+        .limit(200)
     ),
   ]);
 
-  const safeShipments = shipments || [];
+  const shipmentMap = new Map<string, any>();
+  [...(activeShipments || []), ...(recentShipmentRows || []), ...(deliveredTodayRows || [])].forEach((shipment: any) => {
+    if (shipment?.id) shipmentMap.set(shipment.id, shipment);
+  });
+
+  const safeShipments = Array.from(shipmentMap.values());
   const safeRiders = riderLocations || [];
   const safeTerminals = terminals || [];
 
-  const deliveredToday = safeShipments.filter((shipment: any) => shipment.dispatch_stage === 'delivered' && (shipment.updated_at || shipment.created_at) >= todayIso);
-  const recentShipments = [...safeShipments]
+  const deliveredToday = deliveredTodayRows?.length
+    ? deliveredTodayRows
+    : safeShipments.filter((shipment: any) => shipment.dispatch_stage === 'delivered' && (shipment.updated_at || shipment.created_at) >= todayIso);
+  const recentShipments = [...(recentShipmentRows || safeShipments)]
     .sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
     .slice(0, 8);
 
