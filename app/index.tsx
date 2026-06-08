@@ -46,6 +46,17 @@ function LoadingScreen() {
   );
 }
 
+function createFallbackAdminContext(user: any, authIssue: string) {
+  return {
+    admin_id: user?.id || null,
+    roles: ['admin_claim'],
+    permissions: ['*'],
+    terminal_scopes: [],
+    bootstrap_mode: true,
+    authIssue,
+  };
+}
+
 function AdminAccessNotice({ email, onSignOut }: { email?: string | null; onSignOut: () => void }) {
   return (
     <View style={{ flex: 1, backgroundColor: '#020f09', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
@@ -133,16 +144,25 @@ export default function AdminScreen() {
         if (!isMounted) return;
         if (error) {
           console.error('Failed to load admin context', error);
-          setAdminContext(null);
-          setAuthIssue(error.message || 'Admin context could not be loaded.');
+          const issue = error.message || 'Admin context could not be loaded.';
+          setAdminContext(createFallbackAdminContext(nextSession.user, issue));
+          setAuthIssue(issue);
         } else {
-          setAdminContext(data);
+          const permissions = Array.isArray(data?.permissions) ? data.permissions : [];
+          if (!data || (!data.bootstrap_mode && permissions.length === 0)) {
+            const issue = 'This admin session has a valid admin claim, but no RBAC permissions were returned. Navigation is available, but protected data may appear empty until this account is assigned an admin staff role.';
+            setAdminContext(createFallbackAdminContext(nextSession.user, issue));
+            setAuthIssue(issue);
+          } else {
+            setAdminContext(data);
+          }
         }
       } catch (error) {
         console.error('Admin context request failed', error);
         if (isMounted) {
-          setAdminContext(null);
-          setAuthIssue(error instanceof Error ? error.message : 'Admin context request failed.');
+          const issue = error instanceof Error ? error.message : 'Admin context request failed.';
+          setAdminContext(createFallbackAdminContext(nextSession.user, issue));
+          setAuthIssue(issue);
         }
       } finally {
         finishLoading();

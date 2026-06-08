@@ -177,8 +177,10 @@ function useProfileWatcher() {
 /* ─── Main Component ──────────────────────────────────────── */
 const hasMenuPermission = (adminContext: any, permissions: string[] = []) => {
   if (!adminContext) return true;
+  if (adminContext.authIssue) return true;
   const userPermissions = Array.isArray(adminContext?.permissions) ? adminContext.permissions : [];
   if (adminContext.bootstrap_mode || userPermissions.includes('*')) return true;
+  if (permissions.includes('*')) return true;
   if (!permissions.length) return true;
   if (!userPermissions.length) return false;
   return permissions.some((permission) => userPermissions.includes(permission));
@@ -254,7 +256,9 @@ export default function AdminLayout({ children, currentMenu = 'dashboard', onMen
 
   /* ── Notification actions ───────────────────────────────── */
   const unreadCount = notifications.filter((n) => !n.is_read).length;
-  const visibleMenus = SIDEBAR_MENUS.filter((menu) => hasMenuPermission(adminContext, menu.permissions));
+  const permittedMenus = SIDEBAR_MENUS.filter((menu) => hasMenuPermission(adminContext, menu.permissions));
+  const visibleMenus = permittedMenus.length ? permittedMenus : SIDEBAR_MENUS;
+  const permissionIssue = adminContext?.authIssue;
 
   const handleMarkRead = useCallback(async (id: string) => {
     setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, is_read: true } : n)));
@@ -396,6 +400,12 @@ export default function AdminLayout({ children, currentMenu = 'dashboard', onMen
           style={styles.contentScroll}
           contentContainerStyle={[styles.contentContainer, isMobile && styles.contentContainerMobile]}
         >
+          {permissionIssue ? (
+            <View style={styles.permissionWarning}>
+              <Text style={styles.permissionWarningTitle}>Admin permission context needs attention</Text>
+              <Text style={styles.permissionWarningText}>{permissionIssue}</Text>
+            </View>
+          ) : null}
           {children}
         </ScrollView>
       </View>
@@ -472,4 +482,23 @@ const styles = StyleSheet.create({
   contentScroll: { flex: 1 },
   contentContainer: { padding: 30 },
   contentContainerMobile: { padding: 16 },
+  permissionWarning: {
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1,
+    borderColor: '#F59E0B',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  permissionWarningTitle: {
+    color: '#92400E',
+    fontSize: 13,
+    fontWeight: '900',
+    marginBottom: 4,
+  },
+  permissionWarningText: {
+    color: '#92400E',
+    fontSize: 13,
+    lineHeight: 19,
+  },
 });
