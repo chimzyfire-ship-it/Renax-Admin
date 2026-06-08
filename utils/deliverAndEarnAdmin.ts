@@ -135,78 +135,149 @@ export type DeliverAndEarnAdminData = {
   };
 };
 
+type DeliverAndEarnAdminMetricsSnapshot = {
+  applications_pending?: number;
+  active_operators?: number;
+  online_operators?: number;
+  vehicles_active?: number;
+  pending_earnings?: number;
+  available_earnings?: number;
+  pending_payouts?: number;
+  open_incidents?: number;
+  stale_offers?: number;
+};
+
+const ADMIN_QUERY_TIMEOUT_MS = 6000;
+const ADMIN_OPERATOR_LIMIT = 200;
+
 const toNumber = (value: unknown) => Number(value || 0);
 
+async function safeQuery<T>(label: string, queryFn: () => PromiseLike<{ data: T | null; error: any }>): Promise<T | null> {
+  try {
+    const timeoutResult = new Promise<{ data: T | null; error: any }>((resolve) => {
+      setTimeout(() => {
+        resolve({
+          data: null,
+          error: new Error(`${label} query timed out after ${ADMIN_QUERY_TIMEOUT_MS / 1000} seconds`),
+        });
+      }, ADMIN_QUERY_TIMEOUT_MS);
+    });
+
+    const { data, error } = await Promise.race([queryFn(), timeoutResult]);
+    if (error) {
+      console.warn(`[DeliverAndEarnAdmin] ${label} query error:`, error.message || error);
+      return null;
+    }
+    return data;
+  } catch (error) {
+    console.warn(`[DeliverAndEarnAdmin] ${label} query threw:`, error);
+    return null;
+  }
+}
+
+const emptyAdminData = (): DeliverAndEarnAdminData => ({
+  rows: [],
+  vehicles: [],
+  earnings: [],
+  payouts: [],
+  incidents: [],
+  stateRules: [],
+  dispatchWatchlist: [],
+  metrics: {
+    applicationsPending: 0,
+    activeOperators: 0,
+    onlineOperators: 0,
+    vehiclesActive: 0,
+    pendingEarnings: 0,
+    availableEarnings: 0,
+    pendingPayouts: 0,
+    openIncidents: 0,
+    dispatchBacklog: 0,
+    staleOffers: 0,
+    eligibleCandidates: 0,
+  },
+});
+
 export async function fetchDeliverAndEarnAdminData(): Promise<DeliverAndEarnAdminData> {
-  const [profilesResult, vehiclesResult, earningsResult, payoutsResult, incidentsResult, rulesResult, availabilityResult, dispatchWatchlistResult] = await Promise.all([
-    supabase
+  const base = emptyAdminData();
+
+  const [metrics, profiles, payouts, incidents, stateRules, dispatchWatchlist] = await Promise.all([
+    safeQuery<DeliverAndEarnAdminMetricsSnapshot>('deliver_and_earn_admin_overview_metrics', () =>
+      supabase.rpc('deliver_and_earn_admin_overview_metrics').maybeSingle()
+    ),
+    safeQuery<DeliverAndEarnAdminProfile[]>('deliver_and_earn_profiles', () =>
+      supabase
       .from('deliver_and_earn_profiles')
       .select('*, profiles:profiles!deliver_and_earn_profiles_profile_id_fkey(full_name, email, phone_number)')
-      .order('updated_at', { ascending: false }),
-    supabase
-      .from('deliver_and_earn_vehicles')
-      .select('*')
-      .order('updated_at', { ascending: false }),
-    supabase
-      .from('deliver_and_earn_earnings_ledger')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(500),
-    supabase
+      .in('application_status', ['submitted', 'in_review', 'needs_correction', 'approved'])
+      .order('updated_at', { ascending: false })
+      .limit(ADMIN_OPERATOR_LIMIT)
+    ),
+    safeQuery<DeliverAndEarnAdminPayout[]>('deliver_and_earn_payouts', () =>
+      supabase
       .from('deliver_and_earn_payouts')
       .select('*')
       .order('created_at', { ascending: false })
-      .limit(100),
-    supabase
+      .limit(100)
+    ),
+    safeQuery<DeliverAndEarnAdminIncident[]>('deliver_and_earn_incidents', () =>
+      supabase
       .from('deliver_and_earn_incidents')
       .select('*')
       .order('created_at', { ascending: false })
-      .limit(100),
-    supabase
+      .limit(100)
+    ),
+    safeQuery<DeliverAndEarnStateRule[]>('deliver_and_earn_state_rules', () =>
+      supabase
       .from('deliver_and_earn_state_rules')
       .select('*')
-      .order('state', { ascending: true }),
-    supabase
-      .from('deliver_and_earn_availability')
-      .select('operator_id, is_online'),
-    supabase.rpc('deliver_and_earn_dispatch_watchlist', { p_limit: 50 }),
+      .order('state', { ascending: true })
+      .limit(50)
+    ),
+    safeQuery<DeliverAndEarnDispatchWatchlistItem[]>('deliver_and_earn_dispatch_watchlist', () =>
+      supabase.rpc('deliver_and_earn_dispatch_watchlist', { p_limit: 50 })
+    ),
   ]);
 
-  if (profilesResult.error) throw profilesResult.error;
-  if (vehiclesResult.error) throw vehiclesResult.error;
-  if (earningsResult.error) throw earningsResult.error;
-  if (payoutsResult.error) throw payoutsResult.error;
-  if (incidentsResult.error) throw incidentsResult.error;
-  if (rulesResult.error) throw rulesResult.error;
-  if (availabilityResult.error) throw availabilityResult.error;
-  if (dispatchWatchlistResult.error) throw dispatchWatchlistResult.error;
+  const operatorIds = ((profiles || []) as DeliverAndEarnAdminProfile[]).map((profile) => profile.profile_id).filter(Boolean);
 
-  const profiles = (profilesResult.data as DeliverAndEarnAdminProfile[] | null) ?? [];
-  const vehicles = (vehiclesResult.data as DeliverAndEarnAdminVehicle[] | null) ?? [];
-  const earnings = (earningsResult.data as DeliverAndEarnAdminEarning[] | null) ?? [];
-  const payouts = (payoutsResult.data as DeliverAndEarnAdminPayout[] | null) ?? [];
-  const incidents = (incidentsResult.data as DeliverAndEarnAdminIncident[] | null) ?? [];
-  const stateRules = (rulesResult.data as DeliverAndEarnStateRule[] | null) ?? [];
-  const availability = ((availabilityResult.data as { operator_id: string; is_online: boolean }[] | null) ?? []);
-  const dispatchWatchlist = (dispatchWatchlistResult.data as DeliverAndEarnDispatchWatchlistItem[] | null) ?? [];
+  const [vehicles, earnings] = operatorIds.length
+    ? await Promise.all([
+        safeQuery<DeliverAndEarnAdminVehicle[]>('deliver_and_earn_visible_vehicles', () =>
+          supabase
+            .from('deliver_and_earn_vehicles')
+            .select('*')
+            .in('operator_id', operatorIds)
+            .order('updated_at', { ascending: false })
+            .limit(Math.min(operatorIds.length * 3, 600))
+        ),
+        safeQuery<DeliverAndEarnAdminEarning[]>('deliver_and_earn_visible_earnings', () =>
+          supabase
+            .from('deliver_and_earn_earnings_ledger')
+            .select('*')
+            .in('operator_id', operatorIds)
+            .in('status', ['pending_delivery', 'pending_dispute_window', 'available'])
+            .order('created_at', { ascending: false })
+            .limit(1000)
+        ),
+      ])
+    : [[], []];
 
   const vehiclesByOperator = new Map<string, DeliverAndEarnAdminVehicle[]>();
-  vehicles.forEach((vehicle) => {
+  (vehicles || []).forEach((vehicle) => {
     const list = vehiclesByOperator.get(vehicle.operator_id) ?? [];
     list.push(vehicle);
     vehiclesByOperator.set(vehicle.operator_id, list);
   });
 
   const earningsByOperator = new Map<string, DeliverAndEarnAdminEarning[]>();
-  earnings.forEach((earning) => {
+  (earnings || []).forEach((earning) => {
     const list = earningsByOperator.get(earning.operator_id) ?? [];
     list.push(earning);
     earningsByOperator.set(earning.operator_id, list);
   });
 
-  const onlineOperatorIds = new Set(availability.filter((row) => row.is_online).map((row) => row.operator_id));
-
-  const rows = profiles.map((profile) => {
+  const rows = (profiles || []).map((profile) => {
     const operatorEarnings = earningsByOperator.get(profile.profile_id) ?? [];
     return {
       ...profile,
@@ -220,33 +291,37 @@ export async function fetchDeliverAndEarnAdminData(): Promise<DeliverAndEarnAdmi
         .reduce((total, earning) => total + toNumber(earning.operator_amount), 0),
     };
   });
+  const metricNumber = (key: keyof DeliverAndEarnAdminMetricsSnapshot, fallback = 0) =>
+    metrics && metrics[key] !== null && metrics[key] !== undefined
+      ? toNumber(metrics[key])
+      : fallback;
 
   return {
     rows,
-    vehicles,
-    earnings,
-    payouts,
-    incidents,
-    stateRules,
-    dispatchWatchlist,
+    vehicles: vehicles || base.vehicles,
+    earnings: earnings || base.earnings,
+    payouts: payouts || base.payouts,
+    incidents: incidents || base.incidents,
+    stateRules: stateRules || base.stateRules,
+    dispatchWatchlist: dispatchWatchlist || base.dispatchWatchlist,
     metrics: {
-      applicationsPending: rows.filter((row) => ['submitted', 'in_review', 'needs_correction'].includes(row.application_status)).length,
-      activeOperators: rows.filter((row) => row.operator_status === 'active').length,
-      onlineOperators: onlineOperatorIds.size,
-      vehiclesActive: vehicles.filter((vehicle) => vehicle.vehicle_status === 'active').length,
-      pendingEarnings: earnings
+      applicationsPending: metricNumber('applications_pending', rows.filter((row) => ['submitted', 'in_review', 'needs_correction'].includes(row.application_status)).length),
+      activeOperators: metricNumber('active_operators', rows.filter((row) => row.operator_status === 'active').length),
+      onlineOperators: metricNumber('online_operators'),
+      vehiclesActive: metricNumber('vehicles_active', (vehicles || []).filter((vehicle) => vehicle.vehicle_status === 'active').length),
+      pendingEarnings: metricNumber('pending_earnings', (earnings || [])
         .filter((earning) => ['pending_delivery', 'pending_dispute_window'].includes(earning.status))
-        .reduce((total, earning) => total + toNumber(earning.operator_amount), 0),
-      availableEarnings: earnings
+        .reduce((total, earning) => total + toNumber(earning.operator_amount), 0)),
+      availableEarnings: metricNumber('available_earnings', (earnings || [])
         .filter((earning) => earning.status === 'available')
-        .reduce((total, earning) => total + toNumber(earning.operator_amount), 0),
-      pendingPayouts: payouts
+        .reduce((total, earning) => total + toNumber(earning.operator_amount), 0)),
+      pendingPayouts: metricNumber('pending_payouts', (payouts || [])
         .filter((payout) => ['requested', 'under_review', 'approved', 'processing'].includes(payout.status))
-        .reduce((total, payout) => total + toNumber(payout.amount), 0),
-      openIncidents: incidents.filter((incident) => ['open', 'in_review'].includes(incident.status)).length,
-      dispatchBacklog: dispatchWatchlist.length,
-      staleOffers: dispatchWatchlist.reduce((total, row) => total + toNumber(row.stale_offer_count), 0),
-      eligibleCandidates: dispatchWatchlist.reduce((total, row) => total + toNumber(row.eligible_candidate_count), 0),
+        .reduce((total, payout) => total + toNumber(payout.amount), 0)),
+      openIncidents: metricNumber('open_incidents', (incidents || []).filter((incident) => ['open', 'in_review'].includes(incident.status)).length),
+      dispatchBacklog: (dispatchWatchlist || []).length,
+      staleOffers: metricNumber('stale_offers', (dispatchWatchlist || []).reduce((total, row) => total + toNumber(row.stale_offer_count), 0)),
+      eligibleCandidates: (dispatchWatchlist || []).reduce((total, row) => total + toNumber(row.eligible_candidate_count), 0),
     },
   };
 }

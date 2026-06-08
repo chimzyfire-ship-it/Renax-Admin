@@ -230,12 +230,19 @@ export default function DeliverAndEarn() {
         </View>
       ) : null}
 
-      {loading ? (
+      {loading && !data ? (
         <View style={styles.centerState}>
           <ActivityIndicator color={BRAND.green} size="large" />
         </View>
       ) : (
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 36 }}>
+          {loading ? (
+            <View style={styles.refreshingPill}>
+              <ActivityIndicator color={BRAND.green} size="small" />
+              <Text style={styles.refreshingText}>Refreshing Deliver & Earn data...</Text>
+            </View>
+          ) : null}
+
           <View style={styles.statsContainer}>
             {statCards.map((card) => {
               const Icon = card.icon;
@@ -543,6 +550,8 @@ const styles = StyleSheet.create({
   notice: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#FEF3C7', borderWidth: 1, borderColor: '#F59E0B', borderRadius: 8, padding: 12, marginBottom: 16 },
   noticeText: { flex: 1, color: '#92400E', fontSize: 13, lineHeight: 19 },
   centerState: { minHeight: 260, alignItems: 'center', justifyContent: 'center' },
+  refreshingPill: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#ECFDF5', borderWidth: 1, borderColor: '#A7F3D0', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 16 },
+  refreshingText: { color: '#047857', fontSize: 12, fontWeight: '800' },
   statsContainer: { flexDirection: 'row', flexWrap: 'wrap', gap: 14, marginBottom: 18 },
   statCard: { minWidth: 190, flex: 1, backgroundColor: 'rgba(255,255,255,0.92)', borderWidth: 1, borderColor: 'rgba(0,0,0,0.06)', borderRadius: 8, padding: 16, flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
   statLabel: { color: '#6B7280', fontSize: 12, fontWeight: '700' },
