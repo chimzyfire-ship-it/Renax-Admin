@@ -111,6 +111,21 @@ export default function AdminScreen() {
     version: number;
   }>({ version: 0 });
 
+  const handleLogout = async () => {
+    setSession(null);
+    setHasAdminClaim(false);
+    setAdminContext(null);
+    setAuthIssue('');
+    setCurrentMenu('dashboard');
+    setShipmentFocus({ version: 0 });
+
+    try {
+      await supabase.auth.signOut({ scope: 'local' });
+    } catch (error) {
+      console.error('Admin logout failed after local reset', error);
+    }
+  };
+
   useEffect(() => {
     let isMounted = true;
 
@@ -269,7 +284,7 @@ export default function AdminScreen() {
     <AdminLayout
       currentMenu={currentMenu}
       onMenuChange={(menu: string) => setCurrentMenu(menu)}
-      onLogout={() => supabase.auth.signOut()}
+      onLogout={handleLogout}
       adminContext={authIssue ? { ...(adminContext || {}), authIssue } : adminContext}
     >
       {renderContent()}
