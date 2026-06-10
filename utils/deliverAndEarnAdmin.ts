@@ -71,6 +71,18 @@ export type DeliverAndEarnAdminIncident = {
   created_at: string;
 };
 
+export type DeliverAndEarnAdminInvite = {
+  id: string;
+  profile_id: string;
+  email: string | null;
+  invite_code: string;
+  invite_status: 'issued' | 'accepted' | 'expired' | 'revoked';
+  rider_app_url: string;
+  expires_at: string;
+  accepted_at: string | null;
+  created_at: string;
+};
+
 export type DeliverAndEarnStateRule = {
   state: string;
   enabled: boolean;
@@ -107,6 +119,7 @@ export type DeliverAndEarnDispatchWatchlistItem = {
 
 export type DeliverAndEarnAdminRow = DeliverAndEarnAdminProfile & {
   vehicles: DeliverAndEarnAdminVehicle[];
+  invites: DeliverAndEarnAdminInvite[];
   earningsTotal: number;
   pendingEarnings: number;
   availableEarnings: number;
@@ -118,6 +131,7 @@ export type DeliverAndEarnAdminData = {
   earnings: DeliverAndEarnAdminEarning[];
   payouts: DeliverAndEarnAdminPayout[];
   incidents: DeliverAndEarnAdminIncident[];
+  invites: DeliverAndEarnAdminInvite[];
   stateRules: DeliverAndEarnStateRule[];
   dispatchWatchlist: DeliverAndEarnDispatchWatchlistItem[];
   metrics: {
@@ -181,6 +195,7 @@ const emptyAdminData = (): DeliverAndEarnAdminData => ({
   earnings: [],
   payouts: [],
   incidents: [],
+  invites: [],
   stateRules: [],
   dispatchWatchlist: [],
   metrics: {
@@ -241,7 +256,7 @@ export async function fetchDeliverAndEarnAdminData(): Promise<DeliverAndEarnAdmi
 
   const operatorIds = ((profiles || []) as DeliverAndEarnAdminProfile[]).map((profile) => profile.profile_id).filter(Boolean);
 
-  const [vehicles, earnings] = operatorIds.length
+  const [vehicles, earnings, invites] = operatorIds.length
     ? await Promise.all([
         safeQuery<DeliverAndEarnAdminVehicle[]>('deliver_and_earn_visible_vehicles', () =>
           supabase
@@ -260,8 +275,16 @@ export async function fetchDeliverAndEarnAdminData(): Promise<DeliverAndEarnAdmi
             .order('created_at', { ascending: false })
             .limit(1000)
         ),
+        safeQuery<DeliverAndEarnAdminInvite[]>('deliver_and_earn_operator_invites', () =>
+          supabase
+            .from('deliver_and_earn_operator_invites')
+            .select('id, profile_id, email, invite_code, invite_status, rider_app_url, expires_at, accepted_at, created_at')
+            .in('profile_id', operatorIds)
+            .order('created_at', { ascending: false })
+            .limit(Math.min(operatorIds.length * 3, 600))
+        ),
       ])
-    : [[], []];
+    : [[], [], []];
 
   const vehiclesByOperator = new Map<string, DeliverAndEarnAdminVehicle[]>();
   (vehicles || []).forEach((vehicle) => {
@@ -277,11 +300,19 @@ export async function fetchDeliverAndEarnAdminData(): Promise<DeliverAndEarnAdmi
     earningsByOperator.set(earning.operator_id, list);
   });
 
+  const invitesByOperator = new Map<string, DeliverAndEarnAdminInvite[]>();
+  (invites || []).forEach((invite) => {
+    const list = invitesByOperator.get(invite.profile_id) ?? [];
+    list.push(invite);
+    invitesByOperator.set(invite.profile_id, list);
+  });
+
   const rows = (profiles || []).map((profile) => {
     const operatorEarnings = earningsByOperator.get(profile.profile_id) ?? [];
     return {
       ...profile,
       vehicles: vehiclesByOperator.get(profile.profile_id) ?? [],
+      invites: invitesByOperator.get(profile.profile_id) ?? [],
       earningsTotal: operatorEarnings.reduce((total, earning) => total + toNumber(earning.operator_amount), 0),
       pendingEarnings: operatorEarnings
         .filter((earning) => ['pending_delivery', 'pending_dispute_window'].includes(earning.status))
@@ -302,6 +333,7 @@ export async function fetchDeliverAndEarnAdminData(): Promise<DeliverAndEarnAdmi
     earnings: earnings || base.earnings,
     payouts: payouts || base.payouts,
     incidents: incidents || base.incidents,
+    invites: invites || base.invites,
     stateRules: stateRules || base.stateRules,
     dispatchWatchlist: dispatchWatchlist || base.dispatchWatchlist,
     metrics: {
@@ -372,6 +404,34 @@ export async function reviewDeliverAndEarnApplication(params: {
 
   if (error) throw error;
   return data as string;
+}
+
+export async function createDeliverAndEarnOperatorInvite(params: {
+  profileId: string;
+  riderAppUrl?: string;
+  ttlHours?: number;
+}) {
+  const defaultRiderAppUrl = process.env.EXPO_PUBLIC_RIDER_APP_URL || 'https://renax-rider-deploy-real.vercel.app';
+  const { data, error } = await supabase.rpc('admin_create_deliver_and_earn_operator_invite', {
+    p_payload: {
+      profile_id: params.profileId,
+      rider_app_url: params.riderAppUrl || defaultRiderAppUrl,
+      ttl_hours: params.ttlHours || 72,
+    },
+  });
+
+  if (error) throw error;
+  return data as {
+    invite_id?: string;
+    profile_id?: string;
+    email?: string | null;
+    invite_url?: string;
+    invite_code?: string;
+    invite_status?: string;
+    expires_at?: string;
+    rider_app_url?: string;
+    instructions?: string[];
+  };
 }
 
 export async function processDeliverAndEarnPayout(params: {

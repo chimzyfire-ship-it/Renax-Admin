@@ -24,6 +24,7 @@ import {
 } from 'lucide-react-native';
 import { BRAND } from '../../constants/Theme';
 import {
+  createDeliverAndEarnOperatorInvite,
   fetchDeliverAndEarnAdminData,
   processDeliverAndEarnDispatchBacklog,
   processDeliverAndEarnPayout,
@@ -68,6 +69,12 @@ export default function DeliverAndEarn() {
     registrationExpiresAt: getOneYearFutureDateStr(),
   });
   const [message, setMessage] = useState('');
+  const [inviteResult, setInviteResult] = useState<{
+    profileId?: string;
+    inviteUrl?: string;
+    inviteCode?: string;
+    expiresAt?: string;
+  } | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -109,6 +116,7 @@ export default function DeliverAndEarn() {
   const handleReview = async (row: DeliverAndEarnAdminRow, action: 'approve' | 'reject' | 'needs_correction' | 'suspend' | 'reactivate') => {
     setBusyId(`${action}:${row.profile_id}`);
     setMessage('');
+    setInviteResult(null);
     try {
       await reviewDeliverAndEarnApplication({
         profileId: row.profile_id,
@@ -135,6 +143,7 @@ export default function DeliverAndEarn() {
 
     setBusyId(`validate:${row.profile_id}`);
     setMessage('');
+    setInviteResult(null);
     try {
       await updateDeliverAndEarnValidation({
         profileId: row.profile_id,
@@ -149,6 +158,28 @@ export default function DeliverAndEarn() {
     } catch (error) {
       console.error('Deliver & Earn validation update failed', error);
       setMessage(error instanceof Error ? error.message : 'Could not update Deliver & Earn validation.');
+    } finally {
+      setBusyId('');
+    }
+  };
+
+  const handleCreateInvite = async (row: DeliverAndEarnAdminRow) => {
+    setBusyId(`invite:${row.profile_id}`);
+    setMessage('');
+    setInviteResult(null);
+    try {
+      const result = await createDeliverAndEarnOperatorInvite({ profileId: row.profile_id });
+      setInviteResult({
+        profileId: row.profile_id,
+        inviteUrl: result.invite_url,
+        inviteCode: result.invite_code,
+        expiresAt: result.expires_at,
+      });
+      setMessage('Secure Rider app invite generated. Send this link to the approved operator.');
+      await loadData();
+    } catch (error) {
+      console.error('Deliver & Earn invite generation failed', error);
+      setMessage(error instanceof Error ? error.message : 'Could not generate Rider app invite.');
     } finally {
       setBusyId('');
     }
@@ -227,6 +258,19 @@ export default function DeliverAndEarn() {
         <View style={styles.notice}>
           <AlertCircle color="#92400E" size={16} />
           <Text style={styles.noticeText}>{message}</Text>
+        </View>
+      ) : null}
+
+      {inviteResult?.inviteUrl ? (
+        <View style={styles.inviteNotice}>
+          <ShieldCheck color="#047857" size={16} />
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={styles.inviteNoticeTitle}>Rider App Invite</Text>
+            <Text selectable style={styles.inviteUrl}>{inviteResult.inviteUrl}</Text>
+            <Text selectable style={styles.inviteMeta}>
+              Code: {inviteResult.inviteCode || 'N/A'} · Expires: {inviteResult.expiresAt ? new Date(inviteResult.expiresAt).toLocaleString() : 'N/A'}
+            </Text>
+          </View>
         </View>
       ) : null}
 
@@ -322,6 +366,7 @@ export default function DeliverAndEarn() {
                       busyId={busyId}
                       onReview={handleReview}
                       onValidate={handleValidationReady}
+                      onCreateInvite={handleCreateInvite}
                     />
                   ))}
                 </View>
@@ -445,13 +490,20 @@ function OperatorRow({
   busyId,
   onReview,
   onValidate,
+  onCreateInvite,
 }: {
   row: DeliverAndEarnAdminRow;
   busyId: string;
   onReview: (row: DeliverAndEarnAdminRow, action: 'approve' | 'reject' | 'needs_correction' | 'suspend' | 'reactivate') => void;
   onValidate: (row: DeliverAndEarnAdminRow) => void;
+  onCreateInvite: (row: DeliverAndEarnAdminRow) => void;
 }) {
   const primaryVehicle = row.vehicles[0];
+  const latestInvite = row.invites?.[0] ?? null;
+  const latestInviteStatus =
+    latestInvite?.invite_status === 'issued' && latestInvite.expires_at && new Date(latestInvite.expires_at).getTime() <= Date.now()
+      ? 'expired'
+      : latestInvite?.invite_status;
   const title = row.profiles?.full_name || row.profiles?.email || row.profile_id;
   const isBusy = (action: string) => busyId === `${action}:${row.profile_id}`;
   const validationReady =
@@ -463,6 +515,7 @@ function OperatorRow({
     primaryVehicle?.inspection_status === 'verified';
   const canApprove = validationReady && ['submitted', 'in_review', 'needs_correction'].includes(row.application_status);
   const canReactivate = validationReady && row.operator_status === 'suspended' && row.application_status === 'approved';
+  const canCreateInvite = row.application_status === 'approved' && row.operator_status === 'active';
 
   return (
     <View style={styles.operatorRow}>
@@ -485,6 +538,13 @@ function OperatorRow({
           {primaryVehicle
             ? `${primaryVehicle.plate_number} · ${primaryVehicle.vehicle_type} · ${primaryVehicle.make || 'Make'} ${primaryVehicle.model || ''} · ${statusLabel(primaryVehicle.vehicle_status)}`
             : 'No car registered yet'}
+        </Text>
+      </View>
+
+      <View style={styles.inviteStrip}>
+        <ShieldCheck size={16} color="#047857" />
+        <Text style={styles.vehicleText}>
+          Rider access: {latestInvite ? `${statusLabel(latestInviteStatus)} · ${new Date(latestInvite.created_at).toLocaleDateString()}` : 'No secure Rider invite generated yet'}
         </Text>
       </View>
 
@@ -525,6 +585,12 @@ function OperatorRow({
             <Text style={styles.approveBtnText}>Reactivate</Text>
           </Pressable>
         ) : null}
+        {canCreateInvite ? (
+          <Pressable style={styles.inviteBtn} onPress={() => onCreateInvite(row)} disabled={busyId === `invite:${row.profile_id}`}>
+            {busyId === `invite:${row.profile_id}` ? <ActivityIndicator color="#002B22" size="small" /> : <ShieldCheck color="#002B22" size={15} />}
+            <Text style={styles.inviteBtnText}>{latestInvite ? 'Reissue Rider Invite' : 'Generate Rider Invite'}</Text>
+          </Pressable>
+        ) : null}
         <Pressable style={styles.neutralBtn} onPress={() => onReview(row, 'needs_correction')} disabled={isBusy('needs_correction')}>
           <Text style={styles.neutralBtnText}>Correction</Text>
         </Pressable>
@@ -549,6 +615,10 @@ const styles = StyleSheet.create({
   refreshBtnSecondaryText: { color: '#004d3d', fontWeight: '800', fontSize: 13 },
   notice: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#FEF3C7', borderWidth: 1, borderColor: '#F59E0B', borderRadius: 8, padding: 12, marginBottom: 16 },
   noticeText: { flex: 1, color: '#92400E', fontSize: 13, lineHeight: 19 },
+  inviteNotice: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, backgroundColor: '#ECFDF5', borderWidth: 1, borderColor: '#A7F3D0', borderRadius: 8, padding: 12, marginBottom: 16 },
+  inviteNoticeTitle: { color: '#047857', fontSize: 13, fontWeight: '900', marginBottom: 4 },
+  inviteUrl: { color: '#003822', fontSize: 13, lineHeight: 19, fontWeight: '700' },
+  inviteMeta: { marginTop: 4, color: '#047857', fontSize: 12, lineHeight: 18 },
   centerState: { minHeight: 260, alignItems: 'center', justifyContent: 'center' },
   refreshingPill: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#ECFDF5', borderWidth: 1, borderColor: '#A7F3D0', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 16 },
   refreshingText: { color: '#047857', fontSize: 12, fontWeight: '800' },
@@ -578,6 +648,7 @@ const styles = StyleSheet.create({
   statusGroup: { alignItems: 'flex-end', gap: 3 },
   statusText: { fontSize: 12, fontWeight: '800' },
   vehicleStrip: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#F3F4F6', borderRadius: 8, padding: 10 },
+  inviteStrip: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#ECFDF5', borderWidth: 1, borderColor: '#A7F3D0', borderRadius: 8, padding: 10 },
   vehicleText: { flex: 1, color: '#374151', fontSize: 13, lineHeight: 19 },
   checkGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   checkItem: { minWidth: 110, flex: 1, backgroundColor: '#F9FAFB', borderRadius: 8, padding: 10 },
@@ -586,6 +657,8 @@ const styles = StyleSheet.create({
   actionRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8 },
   approveBtn: { flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: '#ccfd3a', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9 },
   approveBtnText: { color: '#002B22', fontSize: 12, fontWeight: '900' },
+  inviteBtn: { flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: '#D1FAE5', borderWidth: 1, borderColor: '#A7F3D0', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9 },
+  inviteBtnText: { color: '#002B22', fontSize: 12, fontWeight: '900' },
   neutralBtn: { borderWidth: 1, borderColor: '#D1D5DB', backgroundColor: '#fff', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9 },
   neutralBtnText: { color: '#374151', fontSize: 12, fontWeight: '800' },
   dangerBtn: { backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FCA5A5', borderRadius: 8, paddingHorizontal: 12, paddingVertical: 9 },
