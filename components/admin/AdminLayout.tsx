@@ -176,13 +176,12 @@ function useProfileWatcher() {
 
 /* ─── Main Component ──────────────────────────────────────── */
 const hasMenuPermission = (adminContext: any, permissions: string[] = []) => {
-  if (!adminContext) return true;
-  if (adminContext.authIssue) return true;
+  if (!adminContext) return false;
   const userPermissions = Array.isArray(adminContext?.permissions) ? adminContext.permissions : [];
   if (adminContext.bootstrap_mode || userPermissions.includes('*')) return true;
-  if (permissions.includes('*')) return true;
   if (!permissions.length) return true;
   if (!userPermissions.length) return false;
+  if (permissions.includes('*')) return false;
   return permissions.some((permission) => userPermissions.includes(permission));
 };
 
@@ -257,7 +256,7 @@ export default function AdminLayout({ children, currentMenu = 'dashboard', onMen
   /* ── Notification actions ───────────────────────────────── */
   const unreadCount = notifications.filter((n) => !n.is_read).length;
   const permittedMenus = SIDEBAR_MENUS.filter((menu) => hasMenuPermission(adminContext, menu.permissions));
-  const visibleMenus = permittedMenus.length ? permittedMenus : SIDEBAR_MENUS;
+  const visibleMenus = permittedMenus;
   const permissionIssue = adminContext?.authIssue;
 
   const handleMarkRead = useCallback(async (id: string) => {

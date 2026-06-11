@@ -166,7 +166,22 @@ const ADMIN_OPERATOR_LIMIT = 200;
 
 const toNumber = (value: unknown) => Number(value || 0);
 
-async function safeQuery<T>(label: string, queryFn: () => PromiseLike<{ data: T | null; error: any }>): Promise<T | null> {
+const isPermissionError = (error: any) => {
+  const message = String(error?.message || error || '').toLowerCase();
+  const code = String(error?.code || '');
+  return code === '42501'
+    || message.includes('permission')
+    || message.includes('not authorized')
+    || message.includes('admin access required')
+    || message.includes('admin permission required')
+    || message.includes('deliver & earn admin access required');
+};
+
+async function safeQuery<T>(
+  label: string,
+  queryFn: () => PromiseLike<{ data: T | null; error: any }>,
+  options: { required?: boolean } = {},
+): Promise<T | null> {
   try {
     const timeoutResult = new Promise<{ data: T | null; error: any }>((resolve) => {
       setTimeout(() => {
@@ -180,11 +195,20 @@ async function safeQuery<T>(label: string, queryFn: () => PromiseLike<{ data: T 
     const { data, error } = await Promise.race([queryFn(), timeoutResult]);
     if (error) {
       console.warn(`[DeliverAndEarnAdmin] ${label} query error:`, error.message || error);
+      if (options.required || isPermissionError(error)) {
+        const permissionHint = isPermissionError(error)
+          ? ' This staff account is not provisioned with Deliver & Earn admin permissions.'
+          : '';
+        throw new Error(`${label}: ${error.message || 'query failed'}.${permissionHint}`);
+      }
       return null;
     }
     return data;
   } catch (error) {
     console.warn(`[DeliverAndEarnAdmin] ${label} query threw:`, error);
+    if (options.required || isPermissionError(error)) {
+      throw error instanceof Error ? error : new Error(`${label}: query failed`);
+    }
     return null;
   }
 }
@@ -219,7 +243,7 @@ export async function fetchDeliverAndEarnAdminData(): Promise<DeliverAndEarnAdmi
   const [metrics, profiles, payouts, incidents, stateRules, dispatchWatchlist] = await Promise.all([
     safeQuery<DeliverAndEarnAdminMetricsSnapshot>('deliver_and_earn_admin_overview_metrics', () =>
       supabase.rpc('deliver_and_earn_admin_overview_metrics').maybeSingle()
-    ),
+    , { required: true }),
     safeQuery<DeliverAndEarnAdminProfile[]>('deliver_and_earn_profiles', () =>
       supabase
       .from('deliver_and_earn_profiles')
@@ -227,7 +251,7 @@ export async function fetchDeliverAndEarnAdminData(): Promise<DeliverAndEarnAdmi
       .in('application_status', ['submitted', 'in_review', 'needs_correction', 'approved'])
       .order('updated_at', { ascending: false })
       .limit(ADMIN_OPERATOR_LIMIT)
-    ),
+    , { required: true }),
     safeQuery<DeliverAndEarnAdminPayout[]>('deliver_and_earn_payouts', () =>
       supabase
       .from('deliver_and_earn_payouts')
