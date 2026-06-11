@@ -84,7 +84,7 @@ export default function DeliverAndEarn() {
       setMessage('');
     } catch (error) {
       console.error('Failed to load Deliver & Earn admin data', error);
-      setMessage('Deliver & Earn admin data is unavailable until the foundation migration is applied.');
+      setMessage(error instanceof Error ? error.message : 'Deliver & Earn admin data is unavailable. Confirm this staff account has Deliver & Earn admin permissions.');
     } finally {
       setLoading(false);
     }
