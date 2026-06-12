@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, ActivityIndicator, Pressable } from 'react-native';
+import { View, Text, ActivityIndicator, Pressable, Platform } from 'react-native';
 import AdminAuthScreen from '../components/admin/AdminAuthScreen';
 import AdminLayout from '../components/admin/AdminLayout';
 import AdminDashboard from '../components/admin/AdminDashboard';
@@ -16,6 +16,48 @@ import Terminals from '../components/admin/Terminals';
 import NotificationQueue from '../components/admin/NotificationQueue';
 import { BRAND } from '../constants/Theme';
 import { supabase } from '../supabase';
+
+const SUPABASE_PROJECT_REF = 'egmebwctchuwabbnvmgc';
+
+function clearAdminWebAuthStorage() {
+  if (Platform.OS !== 'web') return;
+
+  try {
+    const globalScope = globalThis as any;
+    const storageScopes = [globalScope.localStorage, globalScope.sessionStorage].filter(Boolean);
+
+    storageScopes.forEach((storage) => {
+      const keys: string[] = [];
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        const normalizedKey = String(key || '').toLowerCase();
+        if (
+          normalizedKey.startsWith('sb-') ||
+          normalizedKey.includes('supabase') ||
+          normalizedKey.includes(SUPABASE_PROJECT_REF)
+        ) {
+          keys.push(key);
+        }
+      }
+      keys.forEach((key) => storage.removeItem(key));
+    });
+  } catch (error) {
+    console.error('Failed to clear cached admin auth storage', error);
+  }
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string) {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
 
 function resolveClaimRole(user: any) {
   const directRole = user?.app_metadata?.role;
@@ -57,7 +99,7 @@ function AdminAccessNotice({
   title?: string;
   body?: string;
   detail?: string;
-  onSignOut: () => void;
+  onSignOut: () => void | Promise<void>;
 }) {
   return (
     <View style={{ flex: 1, backgroundColor: '#020f09', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
@@ -141,6 +183,7 @@ export default function AdminScreen() {
 
   const handleLogout = async () => {
     setSession(null);
+    setLoading(false);
     setHasAdminClaim(false);
     setAdminContext(null);
     setAuthIssue('');
@@ -148,9 +191,24 @@ export default function AdminScreen() {
     setShipmentFocus({ version: 0 });
 
     try {
-      await supabase.auth.signOut({ scope: 'local' });
+      await withTimeout(supabase.auth.signOut({ scope: 'global' }), 2500, 'Admin global sign-out');
     } catch (error) {
-      console.error('Admin logout failed after local reset', error);
+      console.error('Admin global logout failed after local reset', error);
+    }
+
+    try {
+      await withTimeout(supabase.auth.signOut({ scope: 'local' }), 1500, 'Admin local sign-out');
+    } catch (error) {
+      console.error('Admin local logout cleanup failed', error);
+    } finally {
+      clearAdminWebAuthStorage();
+
+      if (Platform.OS === 'web') {
+        const locationRef = (globalThis as any).location;
+        if (locationRef?.replace) {
+          locationRef.replace(`${locationRef.origin}${locationRef.pathname}`);
+        }
+      }
     }
   };
 
@@ -254,7 +312,7 @@ export default function AdminScreen() {
         title="Admin claim required"
         body="This login is a normal authenticated user, not a RENAX admin staff session."
         detail="Staff must be provisioned by the owner so their Supabase auth app_metadata includes role admin and their profile has an active admin_staff_roles assignment."
-        onSignOut={() => supabase.auth.signOut()}
+        onSignOut={handleLogout}
       />
     );
   }
@@ -266,7 +324,7 @@ export default function AdminScreen() {
         title="Admin staff role required"
         body={authIssue}
         detail="Owner path: create the staff user in Supabase Auth, run provision_admin_staff_by_email(...), then have the staff member sign out and sign back in."
-        onSignOut={() => supabase.auth.signOut()}
+        onSignOut={handleLogout}
       />
     );
   }
