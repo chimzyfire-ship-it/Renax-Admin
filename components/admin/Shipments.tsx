@@ -37,6 +37,7 @@ const STAGE_FILTERS = [
   'out_for_delivery',
   'delivered',
   'exception',
+  'cancelled',
 ];
 
 const formatDate = (dateStr: string) =>
@@ -175,6 +176,8 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
   const [deliverEarnOpsLoading, setDeliverEarnOpsLoading] = useState(false);
   const [deliverEarnOpsBusy, setDeliverEarnOpsBusy] = useState<string | null>(null);
   const [deliverEarnOpsReason, setDeliverEarnOpsReason] = useState('');
+  const [cancelConfirmVisible, setCancelConfirmVisible] = useState(false);
+  const [cancelReasonInput, setCancelReasonInput] = useState('');
 
   const terminalMap = useMemo(
     () => Object.fromEntries(terminals.map((terminal) => [terminal.id, terminal])),
@@ -785,19 +788,22 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
     }
   };
 
-  const handleCancelShipment = async (shipment: any) => {
-    const reason = overrideReason.trim() || 'Admin cancelled shipment and released all active assignments.';
+  const handleCancelShipment = async (shipment: any, reason?: string) => {
+    const cancelReason = (reason ?? '').trim() || 'Admin cancelled shipment and released all active assignments.';
     setBusyId(`cancel:${shipment.id}`);
     try {
       const { error } = await supabase.rpc('admin_cancel_shipment', {
         p_payload: {
           shipment_id: shipment.id,
-          reason,
+          reason: cancelReason,
         },
       });
       if (error) throw error;
+      setCancelConfirmVisible(false);
+      setCancelReasonInput('');
       setOverrideReason('');
-      await reloadShipmentContext(shipment.id);
+      setSelectedShipment(null);
+      await loadShipments();
     } finally {
       setBusyId(null);
     }
@@ -1558,12 +1564,13 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
                     </Pressable>
                     <Pressable
                       style={styles.opsCancelBtn}
-                      onPress={() => handleCancelShipment(selectedShipment)}
+                      onPress={() => {
+                        setCancelReasonInput(overrideReason.trim() || '');
+                        setCancelConfirmVisible(true);
+                      }}
                       disabled={busyId === `cancel:${selectedShipment.id}`}
                     >
-                      <Text style={styles.opsCancelText}>
-                        {busyId === `cancel:${selectedShipment.id}` ? 'Cancelling...' : 'Cancel Shipment'}
-                      </Text>
+                      <Text style={styles.opsCancelText}>Cancel Shipment</Text>
                     </Pressable>
                   </View>
                 </View>
@@ -2317,6 +2324,47 @@ export default function Shipments({ initialShipmentId, initialStageFilter, initi
                 )}
               </ScrollView>
             )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Cancel Shipment Confirmation Modal */}
+      <Modal visible={cancelConfirmVisible} transparent animationType="fade" onRequestClose={() => setCancelConfirmVisible(false)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>
+          <View style={{ backgroundColor: '#fff', borderRadius: 20, padding: 28, width: '92%', maxWidth: 440, ...glass }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 14, gap: 10 }}>
+              <AlertTriangle size={22} color="#DC2626" />
+              <Text style={{ fontSize: 20, fontWeight: '800', color: '#1a1a1a' }}>Cancel Shipment</Text>
+            </View>
+            <Text style={{ fontSize: 14, color: '#555', lineHeight: 21, marginBottom: 18 }}>
+              Are you sure you want to cancel this shipment? This will release all active assignments, terminate the dispatch process, and notify the customer and rider.
+            </Text>
+            <Text style={{ fontSize: 13, fontWeight: '600', color: '#333', marginBottom: 6 }}>Cancellation Reason (optional)</Text>
+            <TextInput
+              style={{ borderWidth: 1, borderColor: '#ddd', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, color: '#333', marginBottom: 20, backgroundColor: '#fafafa' }}
+              placeholder="Admin cancelled shipment and released all active assignments."
+              placeholderTextColor="#aaa"
+              value={cancelReasonInput}
+              onChangeText={setCancelReasonInput}
+              multiline
+            />
+            <View style={{ flexDirection: 'row', gap: 12 }}>
+              <Pressable
+                style={{ flex: 1, backgroundColor: '#f0f0f0', borderRadius: 12, paddingVertical: 13, alignItems: 'center' }}
+                onPress={() => setCancelConfirmVisible(false)}
+              >
+                <Text style={{ fontSize: 14, fontWeight: '700', color: '#555' }}>No, Keep Shipment</Text>
+              </Pressable>
+              <Pressable
+                style={{ flex: 1, backgroundColor: '#DC2626', borderRadius: 12, paddingVertical: 13, alignItems: 'center', opacity: busyId?.startsWith('cancel:') ? 0.6 : 1 }}
+                onPress={() => selectedShipment && handleCancelShipment(selectedShipment, cancelReasonInput)}
+                disabled={!!busyId?.startsWith('cancel:')}
+              >
+                <Text style={{ fontSize: 14, fontWeight: '700', color: '#fff' }}>
+                  {busyId?.startsWith('cancel:') ? 'Cancelling...' : 'Yes, Cancel Shipment'}
+                </Text>
+              </Pressable>
+            </View>
           </View>
         </View>
       </Modal>
